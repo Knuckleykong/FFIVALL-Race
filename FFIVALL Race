@@ -1,0 +1,942 @@
+import discord
+from discord.ext import tasks
+from discord import app_commands
+import requests
+import json
+import asyncio
+import os
+import random
+import time
+from datetime import datetime, timezone
+from dotenv import load_dotenv
+import re
+import ctypes
+from discord.ui import View, button, Button
+
+# === Set console window title ===
+ctypes.windll.kernel32.SetConsoleTitleW("FFIVALLRace Bot")
+
+# === Load environment ===
+load_dotenv(r"C:\Users\Administrator\Desktop\FIVALLRACE\FFIVALLRace.env")
+
+TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+ANNOUNCE_CHANNEL_ID = int(os.getenv("ANNOUNCE_CHANNEL_ID", 0))
+RACE_ALERT_ROLE_ID = int(os.getenv("RACE_ALERT_ROLE_ID", 0))
+API_KEY = os.getenv("FF4FE_API_KEY")
+FF6WC_API_KEY = os.getenv("FF6WC_API_KEY")
+
+# === Preset files ===
+def get_preset_paths():
+    return {
+        "FF4FE": os.getenv("FF4FE_PRESETS_FILE"),
+        "FF1R": os.getenv("FF1R_PRESETS_FILE"),
+        "FF5CD": os.getenv("FF5CD_PRESETS_FILE"),
+        "FFMQR": os.getenv("FFMQR_PRESETS_FILE"),
+        "FF6WC": os.getenv("FF6WC_PRESETS_FILE"),
+    }
+
+PRESET_FILES = get_preset_paths()
+DATA_FILE = os.getenv("RACE_DATA_FILE", "races.json").strip('"')
+USERS_FILE = os.getenv("USERS_FILE", "users.json").strip('"')
+
+races = {}
+users = {}
+last_activity = {}
+
+# === Discord setup ===
+intents = discord.Intents.default()
+intents.guilds = True
+intents.messages = True
+intents.message_content = True
+
+class RaceBot(discord.Client):
+    def __init__(self):
+        super().__init__(intents=intents)
+        self.tree = app_commands.CommandTree(self)
+
+    async def setup_hook(self):
+        await self.tree.sync()
+        print("✅ Slash commands synced.")
+        # Register persistent join buttons for all active races
+        for race in races.values():
+            if (race.get("race_type") == "async" and not race.get("async_finished", False)) or \
+               (race.get("race_type") == "live" and not race.get("started", False)):
+                self.add_view(RaceJoinView(race["race_name"]))
+
+bot = RaceBot()
+
+# === UI Views ===
+class RaceJoinView(View):
+    def __init__(self, race_name):
+        super().__init__(timeout=None)
+        self.race_name = race_name
+
+    @button(label="Join Race", style=discord.ButtonStyle.success)
+    async def join_button(self, interaction: discord.Interaction, button: Button):
+        await joinrace.callback(interaction, race_name=self.race_name)
+
+    @button(label="Watch Race", style=discord.ButtonStyle.primary)
+    async def watch_button(self, interaction: discord.Interaction, button: Button):
+        await watchrace.callback(interaction, race_name=self.race_name)
+
+# === Data functions ===
+def load_races():
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r") as f:
+            races.update(json.load(f))
+
+def save_races():
+    with open(DATA_FILE, "w") as f:
+        json.dump(races, f, indent=4)
+
+def load_users():
+    global users
+    if os.path.exists(USERS_FILE):
+        with open(USERS_FILE, "r") as f:
+            users.update(json.load(f))
+
+def save_users():
+    with open(USERS_FILE, "w") as f:
+        json.dump(users, f, indent=4)
+
+def ensure_user_exists(user_id):
+    user_id = str(user_id)
+    if user_id not in users:
+        users[user_id] = {"shards": 100, "races_joined": {}, "races_won": {}}
+
+def update_user_stats(user_id, randomizer, won=False):
+    ensure_user_exists(user_id)
+    user_id = str(user_id)
+    users[user_id]["races_joined"][randomizer] = users[user_id]["races_joined"].get(randomizer, 0) + 1
+    if won:
+        users[user_id]["races_won"][randomizer] = users[user_id]["races_won"].get(randomizer, 0) + 1
+        users[user_id]["shards"] += 10
+    else:
+        users[user_id]["shards"] += 2
+    save_users()
+
+# === Shards and Participation Helpers ===
+def award_crystal_shards(user_id, randomizer):
+    user_id = str(user_id)
+    ensure_user_exists(user_id)
+    users[user_id]["races_won"][randomizer] = users[user_id]["races_won"].get(randomizer, 0) + 1
+    users[user_id]["shards"] += 10  # Same as live race win value
+    save_users()
+
+def increment_participation(user_id, randomizer):
+    user_id = str(user_id)
+    ensure_user_exists(user_id)
+    users[user_id]["races_joined"][randomizer] = users[user_id]["races_joined"].get(randomizer, 0) + 1
+    users[user_id]["shards"] += 2  # Participation value
+    save_users()
+
+def finalize_live_race(guild, race, channel_id):
+    # Determine winner
+    finishers = [(uid, data["finish_time"]) for uid, data in race["runners"].items()
+                 if data["status"] == "done" and data["finish_time"] is not None]
+    if finishers:
+        winner_id, winner_time = min(finishers, key=lambda x: x[1])
+        award_crystal_shards(winner_id, race["randomizer"])
+        winner_member = guild.get_member(int(winner_id))
+        winner_name = winner_member.mention if winner_member else f"<@{winner_id}>"
+        asyncio.create_task(
+            guild.get_channel(race["channel_id"]).send(f"🏁 Race finished! Winner: {winner_name}")
+        )
+        print(f"Awarded shards to winner {winner_id} in live race {race['race_name']}")
+    else:
+        asyncio.create_task(
+            guild.get_channel(race["channel_id"]).send("🏁 Race finished! No finishers to award.")
+        )
+        print(f"No winner found for live race {race['race_name']}")
+
+    # Participation for all racers
+    for uid in race["runners"].keys():
+        increment_participation(uid, race["randomizer"])
+
+    race["live_finished"] = True
+    save_races()
+    start_cleanup_timer(channel_id)
+
+
+
+@bot.event
+async def on_ready():
+    print(f"✅ Logged in as {bot.user}")
+    load_races()
+    load_users()
+    cleanup_inactive_races.start()
+
+# === Preset handling ===
+def load_presets_for(randomizer):
+    file_path = PRESET_FILES.get(randomizer)
+    if file_path and os.path.isfile(file_path):
+        with open(file_path, "r") as f:
+            return json.load(f)
+    return {}
+
+def generate_manual_seed(randomizer):
+    return ''.join(random.choices('0123456789ABCDEF', k=8))
+
+def generate_ff4fe_seed(preset_or_flags):
+    custom_presets = load_presets_for("FF4FE")
+    flags = custom_presets.get(preset_or_flags, preset_or_flags or random.choice(list(custom_presets.values())))
+    try:
+        gen_resp = requests.post(
+            f"https://ff4fe.galeswift.com/api/generate?key={API_KEY}",
+            json={"flags": flags}, headers={"User-Agent": "DiscordBot"}, timeout=10
+        )
+        gen_data = gen_resp.json()
+        if gen_data.get("status") == "ok":
+            task_id = gen_data.get("task_id")
+            for _ in range(20):
+                time.sleep(1.5)
+                task_data = requests.get(
+                    f"https://ff4fe.galeswift.com/api/task?key={API_KEY}&id={task_id}",
+                    headers={"User-Agent": "DiscordBot"}
+                ).json()
+                if task_data.get("status") == "done":
+                    seed_id = task_data.get("seed_id")
+                    return requests.get(
+                        f"https://ff4fe.galeswift.com/api/seed?key={API_KEY}&id={seed_id}",
+                        headers={"User-Agent": "DiscordBot"}
+                    ).json().get("url")
+        elif gen_data.get("status") == "exists":
+            seed_id = gen_data.get("seed_id")
+            return requests.get(
+                f"https://ff4fe.galeswift.com/api/seed?key={API_KEY}&id={seed_id}",
+                headers={"User-Agent": "DiscordBot"}
+            ).json().get("url")
+    except Exception as e:
+        print(f"❌ FF4FE seed error: {e}")
+    return None
+
+def generate_ff6wc_seed(preset_or_flags):
+    custom_presets = load_presets_for("FF6WC")
+    flags = custom_presets.get(preset_or_flags, preset_or_flags or random.choice(list(custom_presets.values())))
+    try:
+        gen_resp = requests.post(
+            f"https://ff6worldscollide.com/api/seed/create?key={FF6WC_API_KEY}",
+            json={"flags": flags}, headers={"User-Agent": "DiscordBot"}, timeout=10
+        )
+        gen_data = gen_resp.json()
+        if gen_data.get("status") == "ok":
+            seed_id = gen_data.get("seed_id")
+            for _ in range(20):
+                time.sleep(1.5)
+                status_data = requests.get(
+                    f"https://ff6worldscollide.com/api/seed/status?key={FF6WC_API_KEY}&id={seed_id}",
+                    headers={"User-Agent": "DiscordBot"}
+                ).json()
+                if status_data.get("status") == "done":
+                    return f"https://ff6worldscollide.com/seed/{seed_id}"
+        elif gen_data.get("status") == "exists":
+            return f"https://ff6worldscollide.com/seed/{gen_data.get('seed_id')}"
+    except Exception as e:
+        print(f"❌ FF6WC seed error: {e}")
+    return None
+
+def generate_url_seed(randomizer, preset_name, base_url):
+    presets = load_presets_for(randomizer)
+    flagset = presets.get(preset_name)
+    if not flagset:
+        return None
+    seed_hash = ''.join(random.choices("0123456789ABCDEF", k=8))
+    return f"{base_url}?s={seed_hash}&f={flagset}"
+
+def generate_seed(randomizer, preset_or_flags):
+    if randomizer == "FF4FE":
+        return generate_ff4fe_seed(preset_or_flags)
+    elif randomizer == "FF6WC":
+        return generate_ff6wc_seed(preset_or_flags)
+    elif randomizer == "FFMQR":
+        return generate_url_seed("FFMQR", preset_or_flags, "https://www.ffmqrando.net/")
+    elif randomizer == "FF1R":
+        return generate_url_seed("FF1R", preset_or_flags, "https://4-8-6.finalfantasyrandomizer.com/")
+    elif randomizer == "FF5CD":
+        return generate_manual_seed(randomizer)
+    return f"https://placeholder.seed.url/{randomizer}/{preset_or_flags}"
+
+
+# === Slash Commands ===
+@bot.tree.command(name="newrace", description="Start a new race room")
+@app_commands.describe(
+    randomizer="Randomizer to use",
+    race_type="Type of race: Live (everyone starts together) or async (individual start)"
+)
+@app_commands.choices(randomizer=[
+    app_commands.Choice(name="FF4FE", value="FF4FE"),
+    app_commands.Choice(name="FF6WC", value="FF6WC"),
+    app_commands.Choice(name="FF1R", value="FF1R"),
+    app_commands.Choice(name="FF5CD", value="FF5CD"),
+    app_commands.Choice(name="FFMQR", value="FFMQR")
+])
+@app_commands.choices(race_type=[
+    app_commands.Choice(name="Live", value="live"),
+    app_commands.Choice(name="Async", value="async")
+])
+async def newrace(interaction: discord.Interaction, randomizer: app_commands.Choice[str], race_type: app_commands.Choice[str]):
+    guild = interaction.guild
+
+    category_env_key = f"{randomizer.value}_RACE_CATEGORY_ID"
+    category_id = int(os.getenv(category_env_key, 0))
+
+    parent_category = guild.get_channel(category_id)
+    if not parent_category or not isinstance(parent_category, discord.CategoryChannel):
+        await interaction.response.send_message(
+            f"❌ Could not find a category with ID `{category_id}` for `{randomizer.value}`.",
+            ephemeral=True
+        )
+        return
+
+    hash_code = ''.join(random.choices("0123456789ABCDEF", k=4))
+    race_channel_name = f"{randomizer.value.lower()}-{hash_code}-{race_type.value}"
+    channel = await guild.create_text_channel(race_channel_name, category=parent_category)
+
+    races[str(channel.id)] = {
+        "race_name": race_channel_name,
+        "randomizer": randomizer.value,
+        "channel_id": channel.id,
+        "category_id": parent_category.id,
+        "race_type": race_type.value,
+        "joined_users": [interaction.user.id],
+        "ready_users": [],
+	"runners": {},
+        "started": False
+    }
+    last_activity[channel.id] = datetime.now(timezone.utc)
+    save_races()
+
+    await channel.set_permissions(guild.default_role, view_channel=False)
+    await channel.set_permissions(interaction.user, view_channel=True, send_messages=True)
+    await channel.send(f"🏁 Race **{race_channel_name}** created using **{randomizer.name}** randomizer!\n📌 Race type: **{race_type.name}**")
+    await interaction.response.send_message(f"✅ Race room `{race_channel_name}` created.", ephemeral=True)
+
+    # === Announcement ===
+    announcement_channel = guild.get_channel(ANNOUNCE_CHANNEL_ID)
+    race_role = guild.get_role(RACE_ALERT_ROLE_ID)
+    if announcement_channel and race_role:
+        view = RaceJoinView(race_channel_name)
+        announcement_msg = await announcement_channel.send(
+            content=f"{race_role.mention} A new race room **{race_channel_name}** has been created!\n"
+                    f"Randomizer: **{randomizer.name}** | Type: **{race_type.name}**\n"
+                    f"Click below to join or watch:",
+            view=view
+        )
+        races[str(channel.id)]["announcement_channel_id"] = announcement_channel.id
+        races[str(channel.id)]["announcement_message_id"] = announcement_msg.id
+        save_races()
+
+        # Register persistent view only for active race
+        bot.add_view(RaceJoinView(race_channel_name))
+
+
+@bot.tree.command(name="rollseed", description="Generate a new seed")
+@app_commands.describe(flags_or_preset="Preset name or full flagstring")
+async def rollseed(interaction: discord.Interaction, flags_or_preset: str = None):
+    channel_id = str(interaction.channel.id)
+    race = races.get(channel_id)
+
+    if not race or interaction.user.id not in race["joined_users"]:
+        await interaction.response.send_message("❌ You are not part of this race.", ephemeral=True)
+        return
+
+    if race["randomizer"] in ["FF5CD"]:
+        await interaction.response.send_message(
+            f"❌ The `/rollseed` command is disabled for `{race['randomizer']}`.\n"
+            f"Please upload a seed file manually using `/submitseed`.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(thinking=True)
+    preset_used = flags_or_preset or "random"
+    seed_url = generate_seed(race["randomizer"], preset_used)
+
+    if seed_url:
+        message = await interaction.followup.send(
+            f"🔀 Rolled seed using preset/flags: `{preset_used}`\n📎 Link: {seed_url}"
+        )
+        try:
+            await message.pin()
+        except discord.Forbidden:
+            print("⚠️ Missing permissions to pin message.")
+        except discord.HTTPException as e:
+            print(f"❌ Failed to pin rolled seed message: {e}")
+
+        # === Mark that a seed has been set ===
+        race["seed_set"] = True
+        save_races()
+    else:
+        await interaction.followup.send("⚠️ Failed to generate seed.")
+
+
+
+@rollseed.autocomplete("flags_or_preset")
+async def preset_autocomplete(interaction: discord.Interaction, current: str):
+    channel_id = str(interaction.channel.id)
+    race = races.get(channel_id)
+    if not race:
+        return []
+
+    presets = load_presets_for(race["randomizer"])
+    return [
+        app_commands.Choice(name=name, value=name)
+        for name in presets.keys()
+        if current.lower() in name.lower()
+    ][:25]
+
+@bot.tree.command(name="submitseed", description="Upload a seed file to be used for the race")
+@app_commands.describe(seed_file="Attach the seed file (.sfc, .smc, .zip, etc.)")
+async def submitseed(interaction: discord.Interaction, seed_file: discord.Attachment):
+    channel_id = str(interaction.channel.id)
+    race = races.get(channel_id)
+
+    if not race:
+        await interaction.response.send_message("❌ This is not a valid race room.", ephemeral=True)
+        return
+
+    if race.get("submitted_seed"):
+        await interaction.response.send_message("⚠️ A seed has already been submitted for this race.", ephemeral=True)
+        return
+
+    if not seed_file.filename.lower().endswith((".sfc", ".smc", ".zip")):
+        await interaction.response.send_message("❌ Please upload a valid seed file (.sfc, .smc, .zip).", ephemeral=True)
+        return
+
+    # Save file locally (optional)
+    os.makedirs("race_seeds", exist_ok=True)
+    seed_path = f"race_seeds/{channel_id}_{seed_file.filename}"
+    await seed_file.save(seed_path)
+
+    # Store file metadata
+    race["submitted_seed"] = {
+        "filename": seed_file.filename,
+        "url": seed_file.url
+    }
+    # === Mark that a seed has been set ===
+    race["seed_set"] = True
+    save_races()
+
+    # Post the message with file link and try to pin it
+    message = await interaction.channel.send(
+        f"📥 {interaction.user.mention} submitted the official race seed: [`{seed_file.filename}`]({seed_file.url})"
+    )
+    try:
+        await message.pin()
+    except discord.Forbidden:
+        print("⚠️ Missing permissions to pin message.")
+    except discord.HTTPException as e:
+        print(f"❌ Failed to pin message: {e}")
+
+    await interaction.response.send_message("✅ Seed file submitted, shared, and pinned.", ephemeral=True)
+
+@bot.tree.command(name="joinrace", description="Join a race by its name")
+@app_commands.describe(race_name="Name of the race you want to join")
+async def joinrace(interaction: discord.Interaction, race_name: str):
+    race_channel_id = None
+
+    for channel_id, race in races.items():
+        if race["race_name"].lower() == race_name.lower():
+            race_channel_id = channel_id
+            break
+
+    if not race_channel_id:
+        await interaction.response.send_message(f"❌ No race found with name `{race_name}`.", ephemeral=True)
+        return
+
+    race = races[race_channel_id]
+    if interaction.user.id in race["joined_users"]:
+        await interaction.response.send_message("✅ You are already in this race.", ephemeral=True)
+        return
+
+    race["joined_users"].append(interaction.user.id)
+    guild = interaction.guild
+    race_channel = guild.get_channel(race["channel_id"])
+
+    if race_channel:
+        await race_channel.set_permissions(interaction.user, view_channel=True, send_messages=True)
+        await race_channel.send(f"👋 {interaction.user.display_name} has joined the race!")
+
+    save_races()
+    await interaction.response.send_message(f"✅ You have joined `{race_name}`.", ephemeral=True)
+
+@bot.tree.command(name="ready", description="Mark yourself as ready")
+async def ready(interaction: discord.Interaction):
+    channel_id = str(interaction.channel.id)
+    race = races.get(channel_id)
+
+    if not race or interaction.user.id not in race["joined_users"]:
+        await interaction.response.send_message("❌ You are not part of this race.", ephemeral=True)
+        return
+
+    # Async races do not require the ready step
+    if race.get("race_type") == "async":
+        await interaction.response.send_message("⚠️ Ready check is not required in async races.", ephemeral=True)
+        return
+
+    if interaction.user.id in race["ready_users"]:
+        await interaction.response.send_message("✅ You are already marked ready.", ephemeral=True)
+        return
+
+    # Mark user as ready
+    race["ready_users"].append(interaction.user.id)
+    save_races()
+    await interaction.response.send_message(f"✅ {interaction.user.display_name} is ready!")
+
+    # === Live Race: Remove announcement when all players are ready ===
+    if race["race_type"] == "live" and all(uid in race["ready_users"] for uid in race["joined_users"]):
+        ann_channel_id = race.get("announcement_channel_id")
+        ann_message_id = race.get("announcement_message_id")
+        if ann_channel_id and ann_message_id:
+            ann_channel = interaction.guild.get_channel(ann_channel_id)
+            if ann_channel:
+                try:
+                    msg = await ann_channel.fetch_message(ann_message_id)
+                    await msg.delete()
+                    print(f"🧹 Deleted live race announcement for {race['race_name']}")
+                except Exception as e:
+                    print(f"❌ Failed to delete live race announcement: {e}")
+        # Remove keys so cleanup won't try deleting again
+        race.pop("announcement_channel_id", None)
+        race.pop("announcement_message_id", None)
+        save_races()
+
+
+@bot.tree.command(name="ff", description="Forfeit the current race.")
+async def ff(interaction: discord.Interaction):
+    channel_id = str(interaction.channel.id)
+    race = races.get(channel_id)
+
+    if not race:
+        await interaction.response.send_message("This command must be used inside an active race room.", ephemeral=True)
+        return
+
+    runners = race.setdefault("runners", {})
+    user_id = str(interaction.user.id)
+
+    if user_id in runners and runners[user_id]["status"] in ["done", "forfeit"]:
+        await interaction.response.send_message("You are already marked as finished or forfeited.", ephemeral=True)
+        return
+
+    runners[user_id] = {"status": "forfeit", "finish_time": None}
+    save_races()
+
+    # Spoiler access
+    spoiler_channel_name = f"{race['race_name']}-spoilers"
+    spoiler_channel = discord.utils.get(interaction.guild.channels, name=spoiler_channel_name)
+    member = interaction.guild.get_member(interaction.user.id)
+    if spoiler_channel and member:
+        await spoiler_channel.set_permissions(member, view_channel=True)
+
+    await interaction.response.send_message(f"{interaction.user.mention} has forfeited the race.")
+
+    # === Check if race finished (live only) ===
+    if race["race_type"] == "live":
+        joined = set(map(str, race["joined_users"]))
+        finished = {uid for uid, data in runners.items() if data["status"] in ["done", "forfeit"]}
+        if finished == joined:
+            finalize_live_race(interaction.guild, race, channel_id)
+
+
+@bot.tree.command(name="done", description="Mark yourself as done (sync auto time, async manual time).")
+@app_commands.describe(time="(Async only) Your finish time in H:MM:SS format")
+async def done(interaction: discord.Interaction, time: str = None):
+    channel_id = str(interaction.channel.id)
+    race = races.get(channel_id)
+
+    if not race:
+        await interaction.response.send_message("This command must be used inside an active race room.", ephemeral=True)
+        return
+
+    runners = race.setdefault("runners", {})
+    user_id = str(interaction.user.id)
+
+    if user_id in runners and runners[user_id]["status"] in ["done", "forfeit"]:
+        await interaction.response.send_message("You are already marked as finished or forfeited.", ephemeral=True)
+        return
+
+    finish_seconds = None
+    if race["race_type"] == "async":
+        if not time:
+            await interaction.response.send_message("Please provide your finish time in H:MM:SS format (async).", ephemeral=True)
+            return
+        try:
+            parts = list(map(int, time.split(":")))
+            if len(parts) == 3:
+                h, m, s = parts
+            elif len(parts) == 2:
+                h, m, s = 0, parts[0], parts[1]
+            else:
+                raise ValueError
+            finish_seconds = h * 3600 + m * 60 + s
+        except ValueError:
+            await interaction.response.send_message("Invalid time format. Use H:MM:SS or MM:SS.", ephemeral=True)
+            return
+    else:
+        race_start = datetime.fromisoformat(race["start_time"])
+        now = datetime.now(timezone.utc)
+        finish_seconds = int((now - race_start).total_seconds())
+
+    runners[user_id] = {"status": "done", "finish_time": finish_seconds}
+    save_races()
+
+    # Spoiler access
+    spoiler_channel_name = f"{race['race_name']}-spoilers"
+    spoiler_channel = discord.utils.get(interaction.guild.channels, name=spoiler_channel_name)
+    member = interaction.guild.get_member(interaction.user.id)
+    if spoiler_channel and member:
+        await spoiler_channel.set_permissions(member, view_channel=True)
+
+    await interaction.response.send_message(f"{interaction.user.mention} has finished!")
+
+    # === Check if race finished (live only) ===
+    if race["race_type"] == "live":
+        joined = set(map(str, race["joined_users"]))
+        finished = {uid for uid, data in runners.items() if data["status"] in ["done", "forfeit"]}
+        if finished == joined:
+            finalize_live_race(interaction.guild, race, channel_id)
+
+
+@bot.tree.command(name="startrace", description="Start the race with a countdown")
+@app_commands.describe(countdown_seconds="Number of seconds before the race starts (default: 10)")
+async def startrace(interaction: discord.Interaction, countdown_seconds: int = 10):
+    channel_id = str(interaction.channel.id)
+    race = races.get(channel_id)
+
+    if not race or interaction.user.id not in race["joined_users"]:
+        await interaction.response.send_message("❌ You are not part of this race.", ephemeral=True)
+        return
+
+    if race.get("race_type") == "async":
+        await interaction.response.send_message("⛔ This command is disabled for asynchronous races. Use `/startasync` instead.", ephemeral=True)
+        return
+
+    if race.get("started"):
+        await interaction.response.send_message("🚦 The race has already started.", ephemeral=True)
+        return
+
+    # === Require a seed before starting ===
+    if not race.get("seed_set", False):
+        await interaction.response.send_message(
+            "⛔ A seed must be generated or submitted before starting. "
+            "Use `/rollseed` or `/submitseed` first.",
+            ephemeral=True
+        )
+        return
+
+    # Ensure all racers are ready
+    missing = [uid for uid in race["joined_users"] if uid not in race["ready_users"]]
+    if missing:
+        await interaction.response.send_message("⛔ Not all users are marked ready.", ephemeral=True)
+        return
+
+    await interaction.response.send_message(f"⏳ Countdown starting for **{countdown_seconds}** seconds...")
+
+    for i in range(countdown_seconds, 0, -1):
+        await interaction.channel.send(f"{i}...")
+        await asyncio.sleep(1)
+
+    await interaction.channel.send("🏁 **GO!** The race has started!")
+
+    race["started"] = True
+    race["start_time"] = datetime.now(timezone.utc).isoformat()
+    race["finish_times"] = {}
+    save_races()
+
+
+@bot.tree.command(name="addpreset", description="Add a new preset to a specific randomizer")
+@app_commands.describe(
+    randomizer="The randomizer to store this preset under",
+    name="Name of the preset",
+    flags="Flagstring or seed config"
+)
+@app_commands.choices(randomizer=[
+    app_commands.Choice(name="FF4FE", value="FF4FE"),
+    app_commands.Choice(name="FF6WC", value="FF6WC"),
+    app_commands.Choice(name="FF1R", value="FF1R"),
+    app_commands.Choice(name="FF5CD", value="FF5CD"),
+    app_commands.Choice(name="FFMQR", value="FFMQR")
+])
+async def addpreset(interaction: discord.Interaction, randomizer: app_commands.Choice[str], name: str, flags: str):
+    file_path = PRESET_FILES.get(randomizer.value)
+    if not file_path:
+        await interaction.response.send_message("❌ Could not find preset file for this randomizer.", ephemeral=True)
+        return
+
+    if not os.path.exists(file_path):
+        presets = {}
+    else:
+        with open(file_path, "r") as f:
+            presets = json.load(f)
+
+    presets[name] = flags
+    with open(file_path, "w") as f:
+        json.dump(presets, f, indent=2)
+
+    await interaction.response.send_message(f"✅ Preset `{name}` added to {randomizer.name}.", ephemeral=True)
+
+@bot.tree.command(name="listpresets", description="List all presets for a given randomizer")
+@app_commands.describe(randomizer="Select the randomizer to view presets for")
+@app_commands.choices(randomizer=[
+    app_commands.Choice(name="FF4FE", value="FF4FE"),
+    app_commands.Choice(name="FF6WC", value="FF6WC"),
+    app_commands.Choice(name="FF1R", value="FF1R"),
+    app_commands.Choice(name="FF5CD", value="FF5CD"),
+    app_commands.Choice(name="FFMQR", value="FFMQR")
+])
+async def listpresets(interaction: discord.Interaction, randomizer: app_commands.Choice[str]):
+    presets = load_presets_for(randomizer.value)
+    if not presets:
+        await interaction.response.send_message(f"❌ No presets found for {randomizer.name}.", ephemeral=True)
+        return
+
+    preset_list = "\n".join(f"- `{name}`" for name in presets.keys())
+    await interaction.response.send_message(
+        f"📋 Presets for **{randomizer.name}**:\n{preset_list}", ephemeral=True
+    )
+
+@bot.tree.command(name="quit", description="Leave race tracking but stay in the room")
+async def quit(interaction: discord.Interaction):
+    channel_id = str(interaction.channel.id)
+    race = races.get(channel_id)
+
+    if not race or interaction.user.id not in race["joined_users"]:
+        await interaction.response.send_message("❌ You are not tracked in this race.", ephemeral=True)
+        return
+
+    # Remove user from tracking lists but NOT from channel
+    race["joined_users"].remove(interaction.user.id)
+    race["ready_users"] = [uid for uid in race["ready_users"] if uid != interaction.user.id]
+    race.get("finish_times", {}).pop(str(interaction.user.id), None)
+
+    save_races()
+
+    await interaction.channel.send(f"🚪 {interaction.user.display_name} is no longer a tracked racer in this room.")
+    await interaction.response.send_message("✅ You are no longer a tracked racer but still have access.", ephemeral=True)
+
+@bot.tree.command(name="watchrace", description="Gain access to watch a race without participating")
+@app_commands.describe(race_name="Name of the race room you want to watch (e.g., ff4fe-1234)")
+async def watchrace(interaction: discord.Interaction, race_name: str):
+    # Try to find the race by name
+    target_race = None
+    for race in races.values():
+        if race["race_name"].lower() == race_name.lower():
+            target_race = race
+            break
+
+    if not target_race:
+        await interaction.response.send_message(f"❌ No race found with name `{race_name}`.", ephemeral=True)
+        return
+
+    guild = interaction.guild
+    channel = guild.get_channel(target_race["channel_id"])
+    if not channel:
+        await interaction.response.send_message(f"❌ Could not locate the channel for `{race_name}`.", ephemeral=True)
+        return
+
+    # Grant view/send access to the user
+    await channel.set_permissions(interaction.user, view_channel=True, send_messages=True)
+
+    await interaction.response.send_message(
+        f"👀 You can now view and chat in `{race_name}`.\nUse `/quit` if you later join the race by accident.",
+        ephemeral=True
+    )
+    await channel.send(f"👋 {interaction.user.display_name} is now watching the race.")
+
+@bot.tree.command(name="startasync", description="Start an asynchronous race (only for async rooms)")
+async def startasync(interaction: discord.Interaction):
+    channel_id = str(interaction.channel.id)
+    race = races.get(channel_id)
+
+    if not race or race.get("race_type") != "async":
+        await interaction.response.send_message("❌ This command can only be used in asynchronous race rooms.", ephemeral=True)
+        return
+
+    if race.get("started"):
+        await interaction.response.send_message("⚠️ This async race has already been started.", ephemeral=True)
+        return
+
+    race["started"] = True
+    race["start_time"] = datetime.now(timezone.utc).isoformat()
+    save_races()
+
+    await interaction.response.send_message("🕓 This asynchronous race is now marked as started.")
+
+@bot.tree.command(name="finishasync", description="Finish and close the async race.")
+async def finishasync(interaction: discord.Interaction):
+    channel_id = str(interaction.channel.id)
+    race = races.get(channel_id)
+
+    if not race or race["race_type"] != "async":
+        await interaction.response.send_message("This command must be used inside an active async race room.", ephemeral=True)
+        return
+
+    runners = race.get("runners", {})
+    finishers = [(uid, data["finish_time"]) for uid, data in runners.items() if data["status"] == "done" and data["finish_time"] is not None]
+
+    if finishers:
+        winner_id, winner_time = min(finishers, key=lambda x: x[1])
+        award_crystal_shards(winner_id, race["randomizer"])
+        winner_member = interaction.guild.get_member(int(winner_id))
+        winner_mention = winner_member.mention if winner_member else f"<@{winner_id}>"
+        await interaction.response.send_message(f"Async race finished! Winner: {winner_mention}")
+        print(f"Awarded shards to winner {winner_id} in async race {race['race_name']}")
+    else:
+        await interaction.response.send_message("Async race finished! No finishers to award.")
+        print(f"No winner found for async race {race['race_name']}")
+
+    # Participation (done + forfeit)
+    for uid in runners.keys():
+        increment_participation(uid, race["randomizer"])
+
+    # Mark async finished
+    race["async_finished"] = True
+    save_races()
+
+    # Start cleanup timer
+    start_cleanup_timer(channel_id)
+
+@bot.tree.command(name="userdetails", description="Check your or another user's race stats and shards")
+@app_commands.describe(user="The user to check (leave blank to view your own)")
+async def userdetails(interaction: discord.Interaction, user: discord.User = None):
+    target = user or interaction.user
+    user_id = str(target.id)
+
+    ensure_user_exists(user_id)
+
+    data = users.get(user_id, {})
+    shards = data.get("shards", 0)
+    joined = data.get("races_joined", {})
+    won = data.get("races_won", {})
+
+    lines = [f"📊 Stats for **{target.display_name}**"]
+    lines.append(f"💎 Crystal Shards: `{shards}`")
+
+    if not joined:
+        lines.append("No race history.")
+    else:
+        lines.append("🏁 Races by Randomizer:")
+        for rando, count in joined.items():
+            wins = won.get(rando, 0)
+            lines.append(f"• **{rando}**: {count} joined, {wins} won")
+
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+
+@bot.tree.command(name="wager", description="Wager crystal shards on yourself in this race")
+@app_commands.describe(amount="How many shards to wager")
+async def wager(interaction: discord.Interaction, amount: int):
+    channel_id = str(interaction.channel.id)
+    race = races.get(channel_id)
+    user_id = str(interaction.user.id)
+
+    if not race or user_id not in race["joined_users"]:
+        await interaction.response.send_message("❌ You are not part of this race.", ephemeral=True)
+        return
+
+    ensure_user_exists(user_id)
+    user_data = users.get(user_id)
+    current_shards = user_data.get("shards", 0)
+
+    if amount <= 0:
+        await interaction.response.send_message("❌ You must wager at least 1 shard.", ephemeral=True)
+        return
+
+    if amount > current_shards:
+        await interaction.response.send_message("❌ You don't have enough shards to make this wager.", ephemeral=True)
+        return
+
+    race.setdefault("wagers", {})
+    if user_id in race["wagers"]:
+        await interaction.response.send_message("⚠️ You've already placed a wager for this race.", ephemeral=True)
+        return
+
+    # Deduct and record
+    users[user_id]["shards"] -= amount
+    race["wagers"][user_id] = amount
+    save_users()
+    save_races()
+
+    await interaction.response.send_message(f"💰 You wagered **{amount}** shards on yourself. Good luck!", ephemeral=True)
+
+@tasks.loop(minutes=1)
+async def cleanup_inactive_races():
+    now = datetime.now(timezone.utc)
+    for channel_id, last_active in list(last_activity.items()):
+        race = races.get(str(channel_id))
+        if not race or not race.get("started"):
+            continue
+
+        race_type = race.get("race_type", "live")
+        runners = race.get("runners", {})
+        joined = set(map(str, race.get("joined_users", [])))
+        finished = {uid for uid, data in runners.items() if data["status"] in ["done", "forfeit"]}
+
+        # Determine if race is finished
+        all_runners_finished = (finished == joined)
+
+        # Skip unfinished races
+        if race_type == "live" and not all_runners_finished:
+            continue
+        if race_type == "async" and (not all_runners_finished or not race.get("async_finished")):
+            continue
+
+        # Mark as finished
+        race["finished"] = True
+        save_races()
+
+        # Inactivity threshold (10 minutes)
+        if (now - last_active).total_seconds() > 600:
+            guild = discord.utils.get(bot.guilds)
+            race_channel = guild.get_channel(int(channel_id))
+            if race_channel:
+                try:
+                    await race_channel.delete()
+                except Exception as e:
+                    print(f"❌ Failed to delete race channel {channel_id}: {e}")
+
+            spoilers_id = race.get("spoilers_channel_id")
+            if spoilers_id:
+                spoilers_channel = guild.get_channel(spoilers_id)
+                if spoilers_channel:
+                    try:
+                        await spoilers_channel.delete()
+                    except Exception as e:
+                        print(f"❌ Failed to delete spoilers channel {spoilers_id}: {e}")
+
+            ann_channel_id = race.get("announcement_channel_id")
+            ann_message_id = race.get("announcement_message_id")
+            if ann_channel_id and ann_message_id:
+                ann_channel = guild.get_channel(ann_channel_id)
+                if ann_channel:
+                    try:
+                        ann_msg = await ann_channel.fetch_message(ann_message_id)
+                        await ann_msg.delete()
+                        print(f"🧹 Deleted race announcement message {ann_message_id}")
+                    except Exception as e:
+                        print(f"❌ Failed to delete announcement message {ann_message_id}: {e}")
+
+            races.pop(str(channel_id), None)
+            last_activity.pop(channel_id, None)
+            save_races()
+            print(f"🧹 Cleaned up race room {channel_id} and associated spoilers room.")
+
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    # Ignore bot messages
+    if message.author.bot:
+        return
+
+    # Check if this channel is an active race channel
+    channel_id = str(message.channel.id)
+    if channel_id in races:
+        last_activity[channel_id] = datetime.now(timezone.utc)
+        # Debug log (optional)
+        print(f"⏱️ Activity detected in race channel {message.channel.name}, timer reset.")
+
+    # Ensure commands still work
+    await bot.process_commands(message)
+
+bot.run(TOKEN)
