@@ -17,7 +17,7 @@ from discord.ui import View, button, Button
 ctypes.windll.kernel32.SetConsoleTitleW("FFIVALLRace Bot")
 
 # === Load environment ===
-load_dotenv(r"C:\Users\Administrator\Desktop\FIVALLRACE\FFIVALLRace.env")
+load_dotenv(r"path_to_file")
 
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 ANNOUNCE_CHANNEL_ID = int(os.getenv("ANNOUNCE_CHANNEL_ID", 0))
