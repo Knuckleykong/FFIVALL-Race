@@ -1,11 +1,17 @@
 import discord
 from discord import app_commands
 import random
+import asyncio
 from datetime import datetime, timezone
-from race_manager import races, save_races, last_activity, start_cleanup_timer, award_crystal_shards, increment_participation, users, save_users
+
+from race_manager import (
+    races, save_races, last_activity, start_cleanup_timer,
+    award_crystal_shards, increment_participation, users, save_users
+)
 from utils.spoilers import get_or_create_spoiler_room
 from utils.wagers import handle_wager_payout
-from bot_config import ANNOUNCE_CHANNEL_ID, RACE_ALERT_ROLE_ID, RACE_CATEGORY_ID
+from utils.seed_generator import generate_seed, load_presets_for
+from bot_config import ANNOUNCE_CHANNEL_ID, RACE_ALERT_ROLE_ID
 
 def register(bot):
     # === NEW RACE ===
@@ -27,10 +33,10 @@ def register(bot):
     ])
     async def newrace(interaction: discord.Interaction, randomizer: app_commands.Choice[str], race_type: app_commands.Choice[str]):
         guild = interaction.guild
-        parent_category = guild.get_channel(RACE_CATEGORY_ID)
+        parent_category = guild.get_channel(int(interaction.guild.id))  # placeholder, replace with per-randomizer lookup
         if not parent_category or not isinstance(parent_category, discord.CategoryChannel):
             await interaction.response.send_message(
-                f"❌ Could not find the main race category with ID `{RACE_CATEGORY_ID}`.",
+                f"❌ Could not find the main race category for `{randomizer.value}`.",
                 ephemeral=True
             )
             return
@@ -58,14 +64,11 @@ def register(bot):
         await channel.send(f"🏁 Race **{race_channel_name}** created using **{randomizer.name}** randomizer!\n📌 Race type: **{race_type.name}**")
         await interaction.response.send_message(f"✅ Race room `{race_channel_name}` created.", ephemeral=True)
 
+        # Announcement
         announcement_channel = guild.get_channel(ANNOUNCE_CHANNEL_ID)
         race_role = guild.get_role(RACE_ALERT_ROLE_ID)
         if announcement_channel and race_role:
             view = discord.ui.View()
-            async def join_callback(interact: discord.Interaction):
-                await joinrace(interact, race_channel_name)
-            async def watch_callback(interact: discord.Interaction):
-                await watchrace(interact, race_channel_name)
             view.add_item(discord.ui.Button(label="Join Race", style=discord.ButtonStyle.success))
             view.add_item(discord.ui.Button(label="Watch Race", style=discord.ButtonStyle.primary))
             announcement_msg = await announcement_channel.send(
@@ -191,132 +194,57 @@ def register(bot):
         save_races()
         start_cleanup_timer(channel_id)
 
-    # === START RACE ===
-    @bot.tree.command(name="startrace", description="Start the race with a countdown")
-    @app_commands.describe(countdown_seconds="Number of seconds before the race starts (default: 10)")
-    async def startrace(interaction: discord.Interaction, countdown_seconds: int = 10):
+    # === ROLLSEED ===
+    @bot.tree.command(name="rollseed", description="Generate a new seed")
+    @app_commands.describe(flags_or_preset="Preset name or full flagstring")
+    async def rollseed(interaction: discord.Interaction, flags_or_preset: str = None):
         channel_id = str(interaction.channel.id)
         race = races.get(channel_id)
+
         if not race or interaction.user.id not in race["joined_users"]:
             await interaction.response.send_message("❌ You are not part of this race.", ephemeral=True)
             return
-        if race.get("race_type") == "async":
-            await interaction.response.send_message("⛔ This command is disabled for asynchronous races. Use `/startasync` instead.", ephemeral=True)
-            return
-        if race.get("started"):
-            await interaction.response.send_message("🚦 The race has already started.", ephemeral=True)
-            return
-        if not race.get("seed_set", False):
-            await interaction.response.send_message("⛔ A seed must be generated or submitted before starting.", ephemeral=True)
-            return
-        missing = [uid for uid in race["joined_users"] if uid not in race["ready_users"]]
-        if missing:
-            await interaction.response.send_message("⛔ Not all users are marked ready.", ephemeral=True)
-            return
-        await interaction.response.send_message(f"⏳ Countdown starting for **{countdown_seconds}** seconds...")
-        for i in range(countdown_seconds, 0, -1):
-            await interaction.channel.send(f"{i}...")
-            await asyncio.sleep(1)
-        await interaction.channel.send("🏁 **GO!** The race has started!")
-        race["started"] = True
-        race["start_time"] = datetime.now(timezone.utc).isoformat()
-        race["finish_times"] = {}
-        save_races()
 
-    # === JOIN ===
-    @bot.tree.command(name="joinrace", description="Join a race by its name")
-    @app_commands.describe(race_name="Name of the race you want to join")
-    async def joinrace(interaction: discord.Interaction, race_name: str):
-        race_channel_id = None
-        for channel_id, race in races.items():
-            if race["race_name"].lower() == race_name.lower():
-                race_channel_id = channel_id
-                break
-        if not race_channel_id:
-            await interaction.response.send_message(f"❌ No race found with name `{race_name}`.", ephemeral=True)
+        # Disable for FF5CD
+        if race["randomizer"] in ["FF5CD"]:
+            await interaction.response.send_message(
+                f"❌ The `/rollseed` command is disabled for `{race['randomizer']}`.\n"
+                f"Please upload a seed file manually using `/submitseed`.",
+                ephemeral=True
+            )
             return
-        race = races[race_channel_id]
-        if interaction.user.id in race["joined_users"]:
-            await interaction.response.send_message("✅ You are already in this race.", ephemeral=True)
-            return
-        race["joined_users"].append(interaction.user.id)
-        guild = interaction.guild
-        race_channel = guild.get_channel(race["channel_id"])
-        if race_channel:
-            await race_channel.set_permissions(interaction.user, view_channel=True, send_messages=True)
-            await race_channel.send(f"👋 {interaction.user.display_name} has joined the race!")
-        save_races()
-        await interaction.response.send_message(f"✅ You have joined `{race_name}`.", ephemeral=True)
 
-    # === READY ===
-    @bot.tree.command(name="ready", description="Mark yourself as ready")
-    async def ready(interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True)
+        preset_used = flags_or_preset or "random"
+        seed_url = generate_seed(race["randomizer"], preset_used)
+
+        if seed_url:
+            message = await interaction.followup.send(
+                f"🔀 Rolled seed using preset/flags: `{preset_used}`\n📎 Link: {seed_url}"
+            )
+            try:
+                await message.pin()
+            except discord.Forbidden:
+                print("⚠️ Missing permissions to pin message.")
+            except discord.HTTPException as e:
+                print(f"❌ Failed to pin rolled seed message: {e}")
+            race["seed_set"] = True
+            save_races()
+        else:
+            await interaction.followup.send("⚠️ Failed to generate seed.")
+
+    @rollseed.autocomplete("flags_or_preset")
+    async def preset_autocomplete(interaction: discord.Interaction, current: str):
         channel_id = str(interaction.channel.id)
         race = races.get(channel_id)
-        if not race or interaction.user.id not in race["joined_users"]:
-            await interaction.response.send_message("❌ You are not part of this race.", ephemeral=True)
-            return
-        if race.get("race_type") == "async":
-            await interaction.response.send_message("⚠️ Ready check is not required in async races.", ephemeral=True)
-            return
-        if interaction.user.id in race["ready_users"]:
-            await interaction.response.send_message("✅ You are already marked ready.", ephemeral=True)
-            return
-        race["ready_users"].append(interaction.user.id)
-        save_races()
-        await interaction.response.send_message(f"✅ {interaction.user.display_name} is ready!")
-
-    # === QUIT ===
-    @bot.tree.command(name="quit", description="Leave race tracking but stay in the room")
-    async def quit(interaction: discord.Interaction):
-        channel_id = str(interaction.channel.id)
-        race = races.get(channel_id)
-        if not race or interaction.user.id not in race["joined_users"]:
-            await interaction.response.send_message("❌ You are not tracked in this race.", ephemeral=True)
-            return
-        race["joined_users"].remove(interaction.user.id)
-        race["ready_users"] = [uid for uid in race["ready_users"] if uid != interaction.user.id]
-        race.get("finish_times", {}).pop(str(interaction.user.id), None)
-        save_races()
-        await interaction.channel.send(f"🚪 {interaction.user.display_name} is no longer a tracked racer in this room.")
-        await interaction.response.send_message("✅ You are no longer a tracked racer but still have access.", ephemeral=True)
-
-    # === WATCH ===
-    @bot.tree.command(name="watchrace", description="Gain access to watch a race without participating")
-    @app_commands.describe(race_name="Name of the race room you want to watch (e.g., ff4fe-1234)")
-    async def watchrace(interaction: discord.Interaction, race_name: str):
-        target_race = None
-        for race in races.values():
-            if race["race_name"].lower() == race_name.lower():
-                target_race = race
-                break
-        if not target_race:
-            await interaction.response.send_message(f"❌ No race found with name `{race_name}`.", ephemeral=True)
-            return
-        guild = interaction.guild
-        channel = guild.get_channel(target_race["channel_id"])
-        if not channel:
-            await interaction.response.send_message(f"❌ Could not locate the channel for `{race_name}`.", ephemeral=True)
-            return
-        await channel.set_permissions(interaction.user, view_channel=True, send_messages=True)
-        await interaction.response.send_message(f"👀 You can now view and chat in `{race_name}`.", ephemeral=True)
-        await channel.send(f"👋 {interaction.user.display_name} is now watching the race.")
-
-    # === START ASYNC ===
-    @bot.tree.command(name="startasync", description="Start an asynchronous race (only for async rooms)")
-    async def startasync(interaction: discord.Interaction):
-        channel_id = str(interaction.channel.id)
-        race = races.get(channel_id)
-        if not race or race.get("race_type") != "async":
-            await interaction.response.send_message("❌ This command can only be used in asynchronous race rooms.", ephemeral=True)
-            return
-        if race.get("started"):
-            await interaction.response.send_message("⚠️ This async race has already been started.", ephemeral=True)
-            return
-        race["started"] = True
-        race["start_time"] = datetime.now(timezone.utc).isoformat()
-        save_races()
-        await interaction.response.send_message("🕓 This asynchronous race is now marked as started.")
+        if not race:
+            return []
+        presets = load_presets_for(race["randomizer"])
+        return [
+            app_commands.Choice(name=name, value=name)
+            for name in presets.keys()
+            if current.lower() in name.lower()
+        ][:25]
 
 def finalize_race(guild, race, channel_id):
     finishers = [(uid, data["finish_time"]) for uid, data in race["runners"].items() if data["status"] == "done" and data["finish_time"] is not None]
@@ -328,68 +256,13 @@ def finalize_race(guild, race, channel_id):
         winner_name = winner_member.mention if winner_member else f"<@{winner_id}>"
         channel = guild.get_channel(race["channel_id"])
         if channel:
-            import asyncio
             asyncio.create_task(channel.send(f"🏁 Race finished! Winner: {winner_name}"))
     else:
         channel = guild.get_channel(race["channel_id"])
         if channel:
-            import asyncio
             asyncio.create_task(channel.send("🏁 Race finished! No finishers to award."))
     for uid in race["runners"].keys():
         increment_participation(uid, race["randomizer"])
     race["live_finished"] = True
     save_races()
     start_cleanup_timer(channel_id)
-
-@bot.tree.command(name="rollseed", description="Generate a new seed")
-@app_commands.describe(flags_or_preset="Preset name or full flagstring")
-async def rollseed(interaction: discord.Interaction, flags_or_preset: str = None):
-    channel_id = str(interaction.channel.id)
-    race = races.get(channel_id)
-
-    if not race or interaction.user.id not in race["joined_users"]:
-        await interaction.response.send_message("❌ You are not part of this race.", ephemeral=True)
-        return
-
-    # Disable for FF5CD
-    if race["randomizer"] in ["FF5CD"]:
-        await interaction.response.send_message(
-            f"❌ The `/rollseed` command is disabled for `{race['randomizer']}`.\n"
-            f"Please upload a seed file manually using `/submitseed`.",
-            ephemeral=True
-        )
-        return
-
-    await interaction.response.defer(thinking=True)
-    preset_used = flags_or_preset or "random"
-    seed_url = generate_seed(race["randomizer"], preset_used)
-
-    if seed_url:
-        message = await interaction.followup.send(
-            f"🔀 Rolled seed using preset/flags: `{preset_used}`\n📎 Link: {seed_url}"
-        )
-        try:
-            await message.pin()
-        except discord.Forbidden:
-            print("⚠️ Missing permissions to pin message.")
-        except discord.HTTPException as e:
-            print(f"❌ Failed to pin rolled seed message: {e}")
-
-        # Mark that a seed has been set
-        race["seed_set"] = True
-        save_races()
-    else:
-        await interaction.followup.send("⚠️ Failed to generate seed.")
-
-@rollseed.autocomplete("flags_or_preset")
-async def preset_autocomplete(interaction: discord.Interaction, current: str):
-    channel_id = str(interaction.channel.id)
-    race = races.get(channel_id)
-    if not race:
-        return []
-    presets = load_presets_for(race["randomizer"])
-    return [
-        app_commands.Choice(name=name, value=name)
-        for name in presets.keys()
-        if current.lower() in name.lower()
-    ][:25]
