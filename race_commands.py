@@ -168,7 +168,7 @@ def register(bot):
 
         await interaction.response.defer(thinking=True)
         preset_used = flags_or_preset or "random"
-        seed_url = await generate_seed(race["randomizer"], preset_used)
+        seed_url = generate_seed(race["randomizer"], preset_used)
 
         if seed_url:
             try:
