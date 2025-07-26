@@ -85,10 +85,14 @@ def start_cleanup_timer(channel_id):
     save_last_activity()
 
     race = races.get(str(channel_id))
-    if race and race.get("race_type") == "live" and not race.get("finished", False):
+    if not race:
+        return
+
+    if race.get("race_type") == "live" and not race.get("finished", False):
         race["finished"] = True
         save_races()
-    elif race and race.get("race_type") == "async" and not race.get("async_finished", False):
+    elif race.get("race_type") == "async" and not race.get("async_finished", False):
+        # Force async finished state so cleanup runs after inactivity
         race["async_finished"] = True
         save_races()
 
