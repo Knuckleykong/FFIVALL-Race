@@ -2,6 +2,8 @@ import discord
 from discord import app_commands
 import asyncio
 import random
+import json
+import os
 from datetime import datetime, timezone
 
 from race_manager import (
@@ -10,8 +12,13 @@ from race_manager import (
 )
 from utils.spoilers import get_or_create_spoiler_room
 from utils.wagers import handle_wager_payout
-from bot_config import ANNOUNCE_CHANNEL_ID, RACE_ALERT_ROLE_ID, RACE_CATEGORY_ID, FF4FE_API_KEY
-from utils.seeds import generate_seed, load_presets_for
+from utils.seeds import generate_seed
+from bot_config import (
+    ANNOUNCE_CHANNEL_ID,
+    RACE_ALERT_ROLE_ID,
+    RACE_CATEGORY_ID,
+    FF4FE_API_KEY
+)
 
 
 def register(bot):
@@ -149,7 +156,7 @@ def register(bot):
         race["finish_times"] = {}
         save_races()
 
-    # === ROLL SEED (async call) ===
+    # === ROLL SEED (async) ===
     @bot.tree.command(name="rollseed", description="Roll a seed for the current race room")
     @app_commands.describe(flags_or_preset="Preset name or full flagstring")
     async def rollseed(interaction: discord.Interaction, flags_or_preset: str = None):
@@ -185,14 +192,31 @@ def register(bot):
         else:
             await interaction.followup.send("⚠️ Failed to generate seed. Check logs for details.")
 
+    # === AUTOCOMPLETE FOR PRESETS FROM JSON ===
     @rollseed.autocomplete("flags_or_preset")
     async def preset_autocomplete(interaction: discord.Interaction, current: str):
         channel_id = str(interaction.channel.id)
         race = races.get(channel_id)
         if not race:
             return []
-        presets = load_presets_for(race["randomizer"])
-        return [app_commands.Choice(name=name, value=name) for name in presets if current.lower() in name.lower()][:25]
+
+        env_key = f"{race['randomizer']}_PRESETS_FILE"
+        json_path = os.getenv(env_key)
+        if not json_path or not os.path.exists(json_path):
+            return []
+
+        with open(json_path, "r") as f:
+            try:
+                presets = json.load(f)
+            except json.JSONDecodeError:
+                return []
+
+        preset_names = list(presets.keys()) if isinstance(presets, dict) else presets
+        return [
+            app_commands.Choice(name=name, value=name)
+            for name in preset_names
+            if current.lower() in name.lower()
+        ][:25]
 
     # === DONE ===
     @bot.tree.command(name="done", description="Mark yourself as done (sync auto time, async manual time).")
