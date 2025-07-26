@@ -10,7 +10,7 @@ RACE_ALERT_ROLE_ID = int(os.getenv("RACE_ALERT_ROLE_ID", 0))
 RACE_CATEGORY_ID = int(os.getenv("RACE_CATEGORY_ID", 0))
 API_KEY = os.getenv("FF4FE_API_KEY")
 FF6WC_API_KEY = os.getenv("FF6WC_API_KEY")
-
+LAST_ACTIVITY_FILE = os.getenv("LAST_ACTIVITY_FILE", "last_activity.json")
 DATA_FILE = os.getenv("RACE_DATA_FILE", "races.json").strip('"')
 USERS_FILE = os.getenv("USERS_FILE", "users.json").strip('"')
 
