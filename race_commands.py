@@ -340,3 +340,56 @@ def finalize_race(guild, race, channel_id):
     race["live_finished"] = True
     save_races()
     start_cleanup_timer(channel_id)
+
+@bot.tree.command(name="rollseed", description="Generate a new seed")
+@app_commands.describe(flags_or_preset="Preset name or full flagstring")
+async def rollseed(interaction: discord.Interaction, flags_or_preset: str = None):
+    channel_id = str(interaction.channel.id)
+    race = races.get(channel_id)
+
+    if not race or interaction.user.id not in race["joined_users"]:
+        await interaction.response.send_message("❌ You are not part of this race.", ephemeral=True)
+        return
+
+    # Disable for FF5CD
+    if race["randomizer"] in ["FF5CD"]:
+        await interaction.response.send_message(
+            f"❌ The `/rollseed` command is disabled for `{race['randomizer']}`.\n"
+            f"Please upload a seed file manually using `/submitseed`.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(thinking=True)
+    preset_used = flags_or_preset or "random"
+    seed_url = generate_seed(race["randomizer"], preset_used)
+
+    if seed_url:
+        message = await interaction.followup.send(
+            f"🔀 Rolled seed using preset/flags: `{preset_used}`\n📎 Link: {seed_url}"
+        )
+        try:
+            await message.pin()
+        except discord.Forbidden:
+            print("⚠️ Missing permissions to pin message.")
+        except discord.HTTPException as e:
+            print(f"❌ Failed to pin rolled seed message: {e}")
+
+        # Mark that a seed has been set
+        race["seed_set"] = True
+        save_races()
+    else:
+        await interaction.followup.send("⚠️ Failed to generate seed.")
+
+@rollseed.autocomplete("flags_or_preset")
+async def preset_autocomplete(interaction: discord.Interaction, current: str):
+    channel_id = str(interaction.channel.id)
+    race = races.get(channel_id)
+    if not race:
+        return []
+    presets = load_presets_for(race["randomizer"])
+    return [
+        app_commands.Choice(name=name, value=name)
+        for name in presets.keys()
+        if current.lower() in name.lower()
+    ][:25]
