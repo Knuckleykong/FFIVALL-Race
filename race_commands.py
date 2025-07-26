@@ -15,77 +15,72 @@ from utils.seeds import generate_seed, load_presets_for
 
 
 def register(bot):
-# === NEW RACE ===
-@bot.tree.command(name="newrace", description="Start a new race room")
-@app_commands.describe(
-    randomizer="Randomizer to use",
-    race_type="Type of race: Live (everyone starts together) or async (individual start)"
-)
-@app_commands.choices(randomizer=[
-    app_commands.Choice(name="FF4FE", value="FF4FE"),
-    app_commands.Choice(name="FF6WC", value="FF6WC"),
-    app_commands.Choice(name="FF1R", value="FF1R"),
-    app_commands.Choice(name="FF5CD", value="FF5CD"),
-    app_commands.Choice(name="FFMQR", value="FFMQR")
-])
-@app_commands.choices(race_type=[
-    app_commands.Choice(name="Live", value="live"),
-    app_commands.Choice(name="Async", value="async")
-])
-async def newrace(interaction: discord.Interaction, randomizer: app_commands.Choice[str], race_type: app_commands.Choice[str]):
-    guild = interaction.guild
-    parent_category = guild.get_channel(RACE_CATEGORY_ID)
-    if not parent_category or not isinstance(parent_category, discord.CategoryChannel):
-        await interaction.response.send_message(
-            f"❌ Could not find the main race category with ID `{RACE_CATEGORY_ID}`.",
-            ephemeral=True
-        )
-        return
+    # === NEW RACE ===
+    @bot.tree.command(name="newrace", description="Start a new race room")
+    @app_commands.describe(
+        randomizer="Randomizer to use",
+        race_type="Type of race: Live (everyone starts together) or async (individual start)"
+    )
+    @app_commands.choices(randomizer=[
+        app_commands.Choice(name="FF4FE", value="FF4FE"),
+        app_commands.Choice(name="FF6WC", value="FF6WC"),
+        app_commands.Choice(name="FF1R", value="FF1R"),
+        app_commands.Choice(name="FF5CD", value="FF5CD"),
+        app_commands.Choice(name="FFMQR", value="FFMQR")
+    ])
+    @app_commands.choices(race_type=[
+        app_commands.Choice(name="Live", value="live"),
+        app_commands.Choice(name="Async", value="async")
+    ])
+    async def newrace(interaction: discord.Interaction, randomizer: app_commands.Choice[str], race_type: app_commands.Choice[str]):
+        guild = interaction.guild
+        parent_category = guild.get_channel(RACE_CATEGORY_ID)
+        if not parent_category or not isinstance(parent_category, discord.CategoryChannel):
+            await interaction.response.send_message(
+                f"❌ Could not find the main race category with ID `{RACE_CATEGORY_ID}`.",
+                ephemeral=True
+            )
+            return
 
-    hash_code = ''.join(random.choices("0123456789ABCDEF", k=4))
-    race_channel_name = f"{randomizer.value.lower()}-{hash_code}-{race_type.value}"
-    channel = await guild.create_text_channel(race_channel_name, category=parent_category)
+        hash_code = ''.join(random.choices("0123456789ABCDEF", k=4))
+        race_channel_name = f"{randomizer.value.lower()}-{hash_code}-{race_type.value}"
+        channel = await guild.create_text_channel(race_channel_name, category=parent_category)
 
-    races[str(channel.id)] = {
-        "race_name": race_channel_name,
-        "randomizer": randomizer.value,
-        "channel_id": channel.id,
-        "category_id": parent_category.id,
-        "race_type": race_type.value,
-        "joined_users": [interaction.user.id],
-        "ready_users": [],
-        "runners": {},
-        "started": False
-    }
-    last_activity[channel.id] = datetime.now(timezone.utc)
-    save_races()
+        races[str(channel.id)] = {
+            "race_name": race_channel_name,
+            "randomizer": randomizer.value,
+            "channel_id": channel.id,
+            "category_id": parent_category.id,
+            "race_type": race_type.value,
+            "joined_users": [interaction.user.id],
+            "ready_users": [],
+            "runners": {},
+            "started": False
+        }
+        last_activity[channel.id] = datetime.now(timezone.utc)
+        save_races()
 
-    await channel.set_permissions(guild.default_role, view_channel=False)
-    await channel.set_permissions(interaction.user, view_channel=True, send_messages=True)
-    await channel.send(f"🏁 Race **{race_channel_name}** created using **{randomizer.name}** randomizer!\n📌 Race type: **{race_type.name}**")
-    await interaction.response.send_message(f"✅ Race room `{race_channel_name}` created.", ephemeral=True)
+        await channel.set_permissions(guild.default_role, view_channel=False)
+        await channel.set_permissions(interaction.user, view_channel=True, send_messages=True)
+        await channel.send(f"🏁 Race **{race_channel_name}** created using **{randomizer.name}** randomizer!\n📌 Race type: **{race_type.name}**")
+        await interaction.response.send_message(f"✅ Race room `{race_channel_name}` created.", ephemeral=True)
 
-    # === Send announcement for both race types ===
-    announcement_channel = guild.get_channel(ANNOUNCE_CHANNEL_ID)
-    race_role = guild.get_role(RACE_ALERT_ROLE_ID)
-    if announcement_channel and race_role:
-        view = discord.ui.View()
-        view.add_item(discord.ui.Button(label="Join Race", style=discord.ButtonStyle.success))
-        view.add_item(discord.ui.Button(label="Watch Race", style=discord.ButtonStyle.primary))
-        announcement_msg = await announcement_channel.send(
-            content=f"{race_role.mention} A new race room **{race_channel_name}** has been created!\n"
-                    f"Randomizer: **{randomizer.name}** | Type: **{race_type.name}**\n"
-                    f"Click below to join or watch:",
-            view=view
-        )
-
-        # For async races, keep the announcement until /finishasync
-        # For live races, /startrace will delete it
-        races[str(channel.id)]["announcement_channel_id"] = announcement_channel.id
-        races[str(channel.id)]["announcement_message_id"] = announcement_msg.id
-
-    save_races()
-
+        # === Announcement ===
+        announcement_channel = guild.get_channel(ANNOUNCE_CHANNEL_ID)
+        race_role = guild.get_role(RACE_ALERT_ROLE_ID)
+        if announcement_channel and race_role:
+            view = discord.ui.View()
+            view.add_item(discord.ui.Button(label="Join Race", style=discord.ButtonStyle.success))
+            view.add_item(discord.ui.Button(label="Watch Race", style=discord.ButtonStyle.primary))
+            announcement_msg = await announcement_channel.send(
+                content=f"{race_role.mention} A new race room **{race_channel_name}** has been created!\n"
+                        f"Randomizer: **{randomizer.name}** | Type: **{race_type.name}**\n"
+                        f"Click below to join or watch:",
+                view=view
+            )
+            races[str(channel.id)]["announcement_channel_id"] = announcement_channel.id
+            races[str(channel.id)]["announcement_message_id"] = announcement_msg.id
+            save_races()
 
     # === READY ===
     @bot.tree.command(name="ready", description="Mark yourself as ready")
@@ -105,13 +100,12 @@ async def newrace(interaction: discord.Interaction, randomizer: app_commands.Cho
         save_races()
         await interaction.response.send_message(f"✅ {interaction.user.display_name} is ready!")
 
-    # === START RACE ===
+    # === STARTRACE ===
     @bot.tree.command(name="startrace", description="Start the race with a countdown")
     @app_commands.describe(countdown_seconds="Number of seconds before the race starts (default: 10)")
     async def startrace(interaction: discord.Interaction, countdown_seconds: int = 10):
         channel_id = str(interaction.channel.id)
         race = races.get(channel_id)
-
         if not race or interaction.user.id not in race["joined_users"]:
             await interaction.response.send_message("❌ You are not part of this race.", ephemeral=True)
             return
@@ -124,7 +118,6 @@ async def newrace(interaction: discord.Interaction, randomizer: app_commands.Cho
         if not race.get("seed_set", False):
             await interaction.response.send_message("⛔ A seed must be generated or submitted before starting.", ephemeral=True)
             return
-
         missing = [uid for uid in race["joined_users"] if uid not in race["ready_users"]]
         if missing:
             await interaction.response.send_message("⛔ Not all users are marked ready.", ephemeral=True)
@@ -136,7 +129,7 @@ async def newrace(interaction: discord.Interaction, randomizer: app_commands.Cho
             await asyncio.sleep(1)
         await interaction.channel.send("🏁 **GO!** The race has started!")
 
-        # === Delete live race announcement ===
+        # Delete live race announcement
         ann_channel_id = race.get("announcement_channel_id")
         ann_message_id = race.get("announcement_message_id")
         if ann_channel_id and ann_message_id:
@@ -235,6 +228,8 @@ async def newrace(interaction: discord.Interaction, randomizer: app_commands.Cho
             await spoiler_channel.set_permissions(member, view_channel=True)
         await interaction.response.send_message(f"{interaction.user.mention} has finished!")
         joined = set(map(str, race["joined_users"]))
+
+
         finished = {uid for uid, data in runners.items() if data["status"] in ["done", "forfeit"]}
         if finished == joined and race["race_type"] == "live":
             finalize_race(interaction.guild, race, channel_id)
@@ -260,59 +255,52 @@ async def newrace(interaction: discord.Interaction, randomizer: app_commands.Cho
             await spoiler_channel.set_permissions(member, view_channel=True)
         await interaction.response.send_message(f"{interaction.user.mention} has forfeited the race.")
         joined = set(map(str, race["joined_users"]))
+
+
         finished = {uid for uid, data in runners.items() if data["status"] in ["done", "forfeit"]}
         if finished == joined and race["race_type"] == "live":
             finalize_race(interaction.guild, race, channel_id)
 
-# === FINISH ASYNC ===
-@bot.tree.command(name="finishasync", description="Finish and close the async race.")
-async def finishasync(interaction: discord.Interaction):
-    channel_id = str(interaction.channel.id)
-    race = races.get(channel_id)
-    if not race or race["race_type"] != "async":
-        await interaction.response.send_message("This command must be used inside an active async race room.", ephemeral=True)
-        return
+    # === FINISH ASYNC ===
+    @bot.tree.command(name="finishasync", description="Finish and close the async race.")
+    async def finishasync(interaction: discord.Interaction):
+        channel_id = str(interaction.channel.id)
+        race = races.get(channel_id)
+        if not race or race["race_type"] != "async":
+            await interaction.response.send_message("This command must be used inside an active async race room.", ephemeral=True)
+            return
+        runners = race.get("runners", {})
+        finishers = [(uid, data["finish_time"]) for uid, data in runners.items() if data["status"] == "done" and data["finish_time"] is not None]
+        if finishers:
+            winner_id, _ = min(finishers, key=lambda x: x[1])
+            award_crystal_shards(winner_id, race["randomizer"])
+            handle_wager_payout(race, winner_id, users)
+            winner_member = interaction.guild.get_member(int(winner_id))
+            winner_mention = winner_member.mention if winner_member else f"<@{winner_id}>"
+            await interaction.response.send_message(f"Async race finished! Winner: {winner_mention}")
+        else:
+            await interaction.response.send_message("Async race finished! No finishers to award.")
+        for uid in runners.keys():
+            increment_participation(uid, race["randomizer"])
+        race["async_finished"] = True
+        save_races()
+        start_cleanup_timer(channel_id)
 
-    runners = race.get("runners", {})
-    finishers = [(uid, data["finish_time"]) for uid, data in runners.items()
-                 if data["status"] == "done" and data["finish_time"] is not None]
-
-    if finishers:
-        winner_id, _ = min(finishers, key=lambda x: x[1])
-        award_crystal_shards(winner_id, race["randomizer"])
-        handle_wager_payout(race, winner_id, users)
-        winner_member = interaction.guild.get_member(int(winner_id))
-        winner_mention = winner_member.mention if winner_member else f"<@{winner_id}>"
-        await interaction.response.send_message(f"Async race finished! Winner: {winner_mention}")
-    else:
-        await interaction.response.send_message("Async race finished! No finishers to award.")
-
-    for uid in runners.keys():
-        increment_participation(uid, race["randomizer"])
-
-    # Mark async finished
-    race["async_finished"] = True
-
-    # === Delete async race announcement message (if exists) ===
-    ann_channel_id = race.get("announcement_channel_id")
-    ann_message_id = race.get("announcement_message_id")
-    if ann_channel_id and ann_message_id:
-        ann_channel = interaction.guild.get_channel(ann_channel_id)
-        if ann_channel:
-            try:
-                msg = await ann_channel.fetch_message(ann_message_id)
-                await msg.delete()
-                print(f"🧹 Deleted async race announcement for {race['race_name']}")
-            except Exception as e:
-                print(f"❌ Failed to delete async race announcement: {e}")
-        race.pop("announcement_channel_id", None)
-        race.pop("announcement_message_id", None)
-
-    save_races()
-
-    # Start cleanup timer
-    start_cleanup_timer(channel_id)
-
+        # Remove async announcement
+        ann_channel_id = race.get("announcement_channel_id")
+        ann_message_id = race.get("announcement_message_id")
+        if ann_channel_id and ann_message_id:
+            ann_channel = interaction.guild.get_channel(ann_channel_id)
+            if ann_channel:
+                try:
+                    msg = await ann_channel.fetch_message(ann_message_id)
+                    await msg.delete()
+                    print(f"🧹 Deleted async race announcement for {race['race_name']}")
+                except Exception as e:
+                    print(f"❌ Failed to delete async race announcement: {e}")
+            race.pop("announcement_channel_id", None)
+            race.pop("announcement_message_id", None)
+            save_races()
 
     # === JOIN ===
     @bot.tree.command(name="joinrace", description="Join a race by its name")
