@@ -8,7 +8,7 @@ races = {}
 users = {}
 last_activity = {}
 
-# === File paths (set at runtime from main.py) ===
+# === File paths (populated from bot_config) ===
 DATA_FILE = None
 USERS_FILE = None
 LAST_ACTIVITY_FILE = "last_activity.json"
@@ -37,6 +37,9 @@ def load_users():
     if USERS_FILE and os.path.exists(USERS_FILE):
         with open(USERS_FILE, "r") as f:
             users.update(json.load(f))
+    # Ensure all loaded users have shards
+    for uid in users.keys():
+        ensure_user_exists(uid)
 
 def save_users():
     if USERS_FILE:
@@ -49,35 +52,47 @@ def load_last_activity():
     if LAST_ACTIVITY_FILE and os.path.exists(LAST_ACTIVITY_FILE):
         with open(LAST_ACTIVITY_FILE, "r") as f:
             data = json.load(f)
+            # Convert stored ISO times to datetime objects
             last_activity = {int(k): datetime.fromisoformat(v) for k, v in data.items()}
 
 def save_last_activity():
     if LAST_ACTIVITY_FILE:
         with open(LAST_ACTIVITY_FILE, "w") as f:
+            # Convert datetime to ISO string
             json.dump({str(k): v.isoformat() for k, v in last_activity.items()}, f, indent=4)
 
 # === User Helpers ===
 def ensure_user_exists(user_id):
     user_id = str(user_id)
+    # If user does not exist, create with default shards
     if user_id not in users:
         users[user_id] = {"shards": 100, "races_joined": {}, "races_won": {}}
+    else:
+        # Fix missing keys if file was incomplete
+        if "shards" not in users[user_id]:
+            users[user_id]["shards"] = 100
+        if "races_joined" not in users[user_id]:
+            users[user_id]["races_joined"] = {}
+        if "races_won" not in users[user_id]:
+            users[user_id]["races_won"] = {}
 
 def award_crystal_shards(user_id, randomizer):
-    user_id = str(user_id)
     ensure_user_exists(user_id)
+    user_id = str(user_id)
     users[user_id]["races_won"][randomizer] = users[user_id]["races_won"].get(randomizer, 0) + 1
     users[user_id]["shards"] += 10
     save_users()
 
 def increment_participation(user_id, randomizer):
-    user_id = str(user_id)
     ensure_user_exists(user_id)
+    user_id = str(user_id)
     users[user_id]["races_joined"][randomizer] = users[user_id]["races_joined"].get(randomizer, 0) + 1
     users[user_id]["shards"] += 2
     save_users()
 
 # === Cleanup Timer Trigger ===
 def start_cleanup_timer(channel_id):
+    """Mark race as finished and reset last activity so 10min countdown can start"""
     last_activity[int(channel_id)] = datetime.now(timezone.utc)
     save_last_activity()
 
@@ -104,13 +119,11 @@ async def cleanup_inactive_races(bot):
         finished = {uid for uid, data in runners.items() if data["status"] in ["done", "forfeit"]}
         all_runners_finished = (finished == joined)
 
-        # Check if race is actually done
         if race_type == "live" and not (all_runners_finished or race.get("finished")):
             continue
         if race_type == "async" and not (all_runners_finished and race.get("async_finished")):
             continue
 
-        # Wait for inactivity
         if (now - last_active).total_seconds() > 600:
             guild = bot.guilds[0]  # assumes single guild bot
             race_channel = guild.get_channel(int(channel_id))
