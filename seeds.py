@@ -1,86 +1,109 @@
-import requests
-import random
-import asyncio
+import json
+import os
+import aiohttp
+import logging
+from bot_config import (
+    FF4FE_PRESETS_FILE,
+    FF1R_PRESETS_FILE,
+    FF5CD_PRESETS_FILE,
+    FFMQR_PRESETS_FILE,
+    FF6WC_PRESETS_FILE,
+    FF4FE_API_KEY
+)
 
-# === Import your preset loader ===
-from .presets import load_presets_for
+# === Logging Setup ===
+logger = logging.getLogger("SeedGenerator")
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('[%(levelname)s] %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+logger.setLevel(logging.INFO)
 
-# === FF4FE Seed Generation (async) ===
-async def generate_ff4fe_seed(preset_or_flags, api_key):
-    """Generate an FF4FE seed using the API."""
-    custom_presets = load_presets_for("FF4FE")
-    flags = custom_presets.get(preset_or_flags, preset_or_flags or random.choice(list(custom_presets.values())))
+# === Load Presets From JSON Files ===
+def load_presets_for(randomizer: str):
+    """Load presets for the given randomizer from its JSON file defined in .env."""
+    file_map = {
+        "FF4FE": FF4FE_PRESETS_FILE,
+        "FF1R": FF1R_PRESETS_FILE,
+        "FF5CD": FF5CD_PRESETS_FILE,
+        "FFMQR": FFMQR_PRESETS_FILE,
+        "FF6WC": FF6WC_PRESETS_FILE
+    }
+    file_path = file_map.get(randomizer)
+    if not file_path or not os.path.exists(file_path):
+        logger.warning(f"No preset file found for {randomizer}. Returning empty presets.")
+        return {}
 
     try:
-        # Request seed generation
-        gen_resp = requests.post(
-            f"https://ff4fe.galeswift.com/api/generate?key={api_key}",
-            json={"flags": flags},
-            headers={"User-Agent": "DiscordBot"},
-            timeout=10
-        )
-        gen_data = gen_resp.json()
-
-        if gen_data.get("status") == "ok":
-            task_id = gen_data.get("task_id")
-            # Poll for seed generation completion
-            for _ in range(20):
-                await asyncio.sleep(1.5)
-                task_data = requests.get(
-                    f"https://ff4fe.galeswift.com/api/task?key={api_key}&id={task_id}",
-                    headers={"User-Agent": "DiscordBot"}
-                ).json()
-                if task_data.get("status") == "done":
-                    seed_id = task_data.get("seed_id")
-                    return requests.get(
-                        f"https://ff4fe.galeswift.com/api/seed?key={api_key}&id={seed_id}",
-                        headers={"User-Agent": "DiscordBot"}
-                    ).json().get("url")
-        elif gen_data.get("status") == "exists":
-            seed_id = gen_data.get("seed_id")
-            return requests.get(
-                f"https://ff4fe.galeswift.com/api/seed?key={api_key}&id={seed_id}",
-                headers={"User-Agent": "DiscordBot"}
-            ).json().get("url")
-
+        with open(file_path, "r") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                return data
+            else:
+                logger.error(f"Preset file for {randomizer} is not a valid JSON object.")
+                return {}
     except Exception as e:
-        print(f"❌ FF4FE seed generation error: {e}")
+        logger.error(f"Failed to load presets for {randomizer}: {e}")
+        return {}
+
+def get_preset_names(randomizer: str):
+    """Return only preset names for autocomplete."""
+    presets = load_presets_for(randomizer)
+    return list(presets.keys())
+
+# === Async FF4FE Seed Generation ===
+async def generate_ff4fe_seed(preset_or_flags: str, ff4fe_api_key: str = None) -> str:
+    """Generate a seed from the FF4FE API using a preset name or full flagstring."""
+    base_url = "https://ff4fe.com/api/seed"
+    headers = {"Authorization": ff4fe_api_key} if ff4fe_api_key else {}
+
+    # Check if it's a preset name
+    custom_presets = load_presets_for("FF4FE")
+    flags = custom_presets.get(preset_or_flags)
+    payload = {"preset": preset_or_flags} if flags else {"flags": preset_or_flags}
+
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(base_url, headers=headers, json=payload) as resp:
+                if resp.status != 200:
+                    logger.error(f"FF4FE seed generation failed: HTTP {resp.status}")
+                    return None
+                data = await resp.json()
+                return data.get("url") or data.get("seed_url")
+        except Exception as e:
+            logger.error(f"Error generating FF4FE seed: {e}")
+            return None
+
+# === Placeholder Async Generators for Other Randomizers ===
+async def generate_ff1r_seed(preset_or_flags: str) -> str:
+    logger.info("FF1R seed generation placeholder hit.")
     return None
 
-# === FF6WC Seed Generation (placeholder) ===
-def generate_ff6wc_seed(preset_or_flags):
-    """Placeholder for FF6WC seed generation logic."""
-    # Add real API handling here when available
-    return "https://placeholder.ff6wc.seed.url"
+async def generate_ff5cd_seed(preset_or_flags: str) -> str:
+    logger.info("FF5CD seed generation placeholder hit.")
+    return None
 
-# === FF1R Seed Generation (placeholder) ===
-def generate_ff1r_seed(preset_or_flags):
-    """Placeholder for FF1R seed generation logic."""
-    return "https://placeholder.ff1r.seed.url"
+async def generate_ffmqr_seed(preset_or_flags: str) -> str:
+    logger.info("FFMQR seed generation placeholder hit.")
+    return None
 
-# === FF5CD Seed Generation (placeholder) ===
-def generate_ff5cd_seed(preset_or_flags):
-    """FF5CD uses manual seed uploads; this is intentionally disabled."""
-    return None  # will be blocked at /rollseed
+async def generate_ff6wc_seed(preset_or_flags: str) -> str:
+    logger.info("FF6WC seed generation placeholder hit.")
+    return None
 
-# === FFMQR Seed Generation (placeholder) ===
-def generate_ffmqr_seed(preset_or_flags):
-    """Placeholder for FFMQR seed generation logic."""
-    return "https://placeholder.ffmqr.seed.url"
-
-# === Dispatcher ===
-async def generate_seed(randomizer, preset_or_flags, ff4fe_api_key=None):
-    """Dispatch seed generation based on selected randomizer."""
+# === Main Dispatcher ===
+async def generate_seed(randomizer: str, preset_or_flags: str, ff4fe_api_key: str = FF4FE_API_KEY):
+    """Dispatch to the appropriate seed generation function based on randomizer."""
     if randomizer == "FF4FE":
         return await generate_ff4fe_seed(preset_or_flags, ff4fe_api_key)
-    elif randomizer == "FF6WC":
-        return generate_ff6wc_seed(preset_or_flags)
     elif randomizer == "FF1R":
-        return generate_ff1r_seed(preset_or_flags)
+        return await generate_ff1r_seed(preset_or_flags)
     elif randomizer == "FF5CD":
-        return generate_ff5cd_seed(preset_or_flags)
+        return await generate_ff5cd_seed(preset_or_flags)
     elif randomizer == "FFMQR":
-        return generate_ffmqr_seed(preset_or_flags)
-    else:
-        print(f"⚠️ Unknown randomizer '{randomizer}' requested.")
-        return None
+        return await generate_ffmqr_seed(preset_or_flags)
+    elif randomizer == "FF6WC":
+        return await generate_ff6wc_seed(preset_or_flags)
+    logger.warning(f"Unknown randomizer requested: {randomizer}")
+    return None
