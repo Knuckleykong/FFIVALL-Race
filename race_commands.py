@@ -10,7 +10,7 @@ from race_manager import (
 )
 from utils.spoilers import get_or_create_spoiler_room
 from utils.wagers import handle_wager_payout
-from bot_config import ANNOUNCE_CHANNEL_ID, RACE_ALERT_ROLE_ID, RACE_CATEGORY_ID
+from bot_config import ANNOUNCE_CHANNEL_ID, RACE_ALERT_ROLE_ID, RACE_CATEGORY_ID, FF4FE_API_KEY
 from utils.seeds import generate_seed, load_presets_for
 
 
@@ -65,7 +65,6 @@ def register(bot):
         await channel.send(f"🏁 Race **{race_channel_name}** created using **{randomizer.name}** randomizer!\n📌 Race type: **{race_type.name}**")
         await interaction.response.send_message(f"✅ Race room `{race_channel_name}` created.", ephemeral=True)
 
-        # === Announcement ===
         announcement_channel = guild.get_channel(ANNOUNCE_CHANNEL_ID)
         race_role = guild.get_role(RACE_ALERT_ROLE_ID)
         if announcement_channel and race_role:
@@ -100,12 +99,13 @@ def register(bot):
         save_races()
         await interaction.response.send_message(f"✅ {interaction.user.display_name} is ready!")
 
-    # === STARTRACE ===
+    # === START RACE (Live only) ===
     @bot.tree.command(name="startrace", description="Start the race with a countdown")
     @app_commands.describe(countdown_seconds="Number of seconds before the race starts (default: 10)")
     async def startrace(interaction: discord.Interaction, countdown_seconds: int = 10):
         channel_id = str(interaction.channel.id)
         race = races.get(channel_id)
+
         if not race or interaction.user.id not in race["joined_users"]:
             await interaction.response.send_message("❌ You are not part of this race.", ephemeral=True)
             return
@@ -138,7 +138,6 @@ def register(bot):
                 try:
                     msg = await ann_channel.fetch_message(ann_message_id)
                     await msg.delete()
-                    print(f"🧹 Deleted live race announcement for {race['race_name']}")
                 except Exception as e:
                     print(f"❌ Failed to delete live race announcement: {e}")
             race.pop("announcement_channel_id", None)
@@ -150,7 +149,7 @@ def register(bot):
         race["finish_times"] = {}
         save_races()
 
-    # === ROLL SEED ===
+    # === ROLL SEED (async call) ===
     @bot.tree.command(name="rollseed", description="Roll a seed for the current race room")
     @app_commands.describe(flags_or_preset="Preset name or full flagstring")
     async def rollseed(interaction: discord.Interaction, flags_or_preset: str = None):
@@ -159,7 +158,7 @@ def register(bot):
         if not race or interaction.user.id not in race["joined_users"]:
             await interaction.response.send_message("❌ You are not part of this race.", ephemeral=True)
             return
-        if race["randomizer"] in ["FF5CD"]:
+        if race["randomizer"] == "FF5CD":
             await interaction.response.send_message(
                 f"❌ The `/rollseed` command is disabled for `{race['randomizer']}`.\n"
                 f"Please upload a seed file manually using `/submitseed`.",
@@ -169,10 +168,12 @@ def register(bot):
 
         await interaction.response.defer(thinking=True)
         preset_used = flags_or_preset or "random"
-        seed_url = generate_seed(race["randomizer"], preset_used)
+        seed_url = await generate_seed(race["randomizer"], preset_used, FF4FE_API_KEY)
 
         if seed_url:
-            message = await interaction.followup.send(f"🔀 Rolled seed using preset/flags: `{preset_used}`\n📎 Link: {seed_url}")
+            message = await interaction.followup.send(
+                f"🔀 Rolled seed using preset/flags: `{preset_used}`\n📎 Link: {seed_url}"
+            )
             try:
                 await message.pin()
             except discord.Forbidden:
@@ -182,7 +183,7 @@ def register(bot):
             race["seed_set"] = True
             save_races()
         else:
-            await interaction.followup.send("⚠️ Failed to generate seed.")
+            await interaction.followup.send("⚠️ Failed to generate seed. Check logs for details.")
 
     @rollseed.autocomplete("flags_or_preset")
     async def preset_autocomplete(interaction: discord.Interaction, current: str):
@@ -191,7 +192,7 @@ def register(bot):
         if not race:
             return []
         presets = load_presets_for(race["randomizer"])
-        return [app_commands.Choice(name=name, value=name) for name in presets.keys() if current.lower() in name.lower()][:25]
+        return [app_commands.Choice(name=name, value=name) for name in presets if current.lower() in name.lower()][:25]
 
     # === DONE ===
     @bot.tree.command(name="done", description="Mark yourself as done (sync auto time, async manual time).")
@@ -228,8 +229,6 @@ def register(bot):
             await spoiler_channel.set_permissions(member, view_channel=True)
         await interaction.response.send_message(f"{interaction.user.mention} has finished!")
         joined = set(map(str, race["joined_users"]))
-
-
         finished = {uid for uid, data in runners.items() if data["status"] in ["done", "forfeit"]}
         if finished == joined and race["race_type"] == "live":
             finalize_race(interaction.guild, race, channel_id)
@@ -255,8 +254,6 @@ def register(bot):
             await spoiler_channel.set_permissions(member, view_channel=True)
         await interaction.response.send_message(f"{interaction.user.mention} has forfeited the race.")
         joined = set(map(str, race["joined_users"]))
-
-
         finished = {uid for uid, data in runners.items() if data["status"] in ["done", "forfeit"]}
         if finished == joined and race["race_type"] == "live":
             finalize_race(interaction.guild, race, channel_id)
@@ -282,25 +279,25 @@ def register(bot):
             await interaction.response.send_message("Async race finished! No finishers to award.")
         for uid in runners.keys():
             increment_participation(uid, race["randomizer"])
-        race["async_finished"] = True
-        save_races()
-        start_cleanup_timer(channel_id)
 
-        # Remove async announcement
+        # delete async race announcement now
         ann_channel_id = race.get("announcement_channel_id")
         ann_message_id = race.get("announcement_message_id")
         if ann_channel_id and ann_message_id:
             ann_channel = interaction.guild.get_channel(ann_channel_id)
             if ann_channel:
                 try:
-                    msg = await ann_channel.fetch_message(ann_message_id)
-                    await msg.delete()
-                    print(f"🧹 Deleted async race announcement for {race['race_name']}")
+                    ann_msg = await ann_channel.fetch_message(ann_message_id)
+                    await ann_msg.delete()
                 except Exception as e:
                     print(f"❌ Failed to delete async race announcement: {e}")
             race.pop("announcement_channel_id", None)
             race.pop("announcement_message_id", None)
             save_races()
+
+        race["async_finished"] = True
+        save_races()
+        start_cleanup_timer(channel_id)
 
     # === JOIN ===
     @bot.tree.command(name="joinrace", description="Join a race by its name")
@@ -396,6 +393,7 @@ def register(bot):
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
 
+# === Finalize race ===
 def finalize_race(guild, race, channel_id):
     finishers = [(uid, data["finish_time"]) for uid, data in race["runners"].items() if data["status"] == "done" and data["finish_time"] is not None]
     if finishers:
