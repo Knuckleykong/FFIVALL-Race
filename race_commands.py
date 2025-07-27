@@ -2,15 +2,18 @@ import discord
 from discord import app_commands
 import asyncio
 import random
+import os
+import json
 from datetime import datetime, timezone
 
 from race_manager import (
     races, save_races, last_activity, start_cleanup_timer,
-    award_crystal_shards, increment_participation, users, save_users, ensure_user_exists
+    award_crystal_shards, increment_participation, users,
+    save_users, ensure_user_exists
 )
 from utils.spoilers import get_or_create_spoiler_room
 from utils.wagers import handle_wager_payout
-from bot_config import ANNOUNCE_CHANNEL_ID, RACE_ALERT_ROLE_ID, RACE_CATEGORY_ID
+from bot_config import ANNOUNCE_CHANNEL_ID, RACE_ALERT_ROLE_ID, RACE_CATEGORY_ID, PRESET_FILES
 from utils.seeds import generate_seed, load_presets_for
 
 
@@ -102,7 +105,7 @@ def register(bot):
         save_races()
         await interaction.response.send_message(f"✅ {interaction.user.display_name} is ready!")
 
-    # === START RACE (Live only) ===
+    # === START RACE ===
     @bot.tree.command(name="startrace", description="Start the race with a countdown")
     @app_commands.describe(countdown_seconds="Number of seconds before the race starts (default: 10)")
     async def startrace(interaction: discord.Interaction, countdown_seconds: int = 10):
@@ -112,7 +115,7 @@ def register(bot):
             await interaction.response.send_message("❌ You are not part of this race.", ephemeral=True)
             return
         if race.get("race_type") == "async":
-            await interaction.response.send_message("⛔ This command is disabled for asynchronous races. Use `/startasync` instead.", ephemeral=True)
+            await interaction.response.send_message("⛔ Disabled for async races. Use `/startasync`.", ephemeral=True)
             return
         if race.get("started"):
             await interaction.response.send_message("🚦 The race has already started.", ephemeral=True)
@@ -131,19 +134,17 @@ def register(bot):
             await asyncio.sleep(1)
         await interaction.channel.send("🏁 **GO!** The race has started!")
 
-        ann_channel_id = race.get("announcement_channel_id")
-        ann_message_id = race.get("announcement_message_id")
-        if ann_channel_id and ann_message_id:
-            try:
+        try:
+            ann_channel_id = race.get("announcement_channel_id")
+            ann_message_id = race.get("announcement_message_id")
+            if ann_channel_id and ann_message_id:
                 ann_channel = interaction.guild.get_channel(ann_channel_id)
                 msg = await ann_channel.fetch_message(ann_message_id)
                 await msg.delete()
-            except:
-                pass
-            race.pop("announcement_channel_id", None)
-            race.pop("announcement_message_id", None)
-            save_races()
-
+        except:
+            pass
+        race.pop("announcement_channel_id", None)
+        race.pop("announcement_message_id", None)
         race["started"] = True
         race["start_time"] = datetime.now(timezone.utc).isoformat()
         race["finish_times"] = {}
@@ -169,7 +170,6 @@ def register(bot):
         await interaction.response.defer(thinking=True)
         preset_used = flags_or_preset or "random"
         seed_url = generate_seed(race["randomizer"], preset_used)
-
         if seed_url:
             try:
                 message = await interaction.followup.send(f"🔀 Rolled seed using preset/flags: `{preset_used}`\n📎 Link: {seed_url}")
@@ -190,6 +190,82 @@ def register(bot):
         presets = load_presets_for(race["randomizer"])
         return [app_commands.Choice(name=name, value=name) for name in presets if current.lower() in name.lower()][:25]
 
+    # === SUBMIT SEED ===
+    @bot.tree.command(name="submitseed", description="Upload a seed file to be used for the race")
+    @app_commands.describe(seed_file="Attach the seed file (.sfc, .smc, .zip, etc.)")
+    async def submitseed(interaction: discord.Interaction, seed_file: discord.Attachment):
+        channel_id = str(interaction.channel.id)
+        race = races.get(channel_id)
+        if not race:
+            await interaction.response.send_message("❌ This is not a valid race room.", ephemeral=True)
+            return
+        if race.get("submitted_seed"):
+            await interaction.response.send_message("⚠️ A seed has already been submitted for this race.", ephemeral=True)
+            return
+        if not seed_file.filename.lower().endswith((".sfc", ".smc", ".zip")):
+            await interaction.response.send_message("❌ Please upload a valid seed file (.sfc, .smc, .zip).", ephemeral=True)
+            return
+
+        os.makedirs("race_seeds", exist_ok=True)
+        seed_path = f"race_seeds/{channel_id}_{seed_file.filename}"
+        await seed_file.save(seed_path)
+
+        race["submitted_seed"] = {"filename": seed_file.filename, "url": seed_file.url}
+        race["seed_set"] = True
+        save_races()
+
+        message = await interaction.channel.send(f"📥 {interaction.user.mention} submitted the official race seed: [`{seed_file.filename}`]({seed_file.url})")
+        try:
+            await message.pin()
+        except:
+            pass
+        await interaction.response.send_message("✅ Seed file submitted, shared, and pinned.", ephemeral=True)
+
+    # === ADD PRESET / LIST PRESETS ===
+    @bot.tree.command(name="addpreset", description="Add a new preset to a specific randomizer")
+    @app_commands.describe(
+        randomizer="The randomizer to store this preset under",
+        name="Name of the preset",
+        flags="Flagstring or seed config"
+    )
+    @app_commands.choices(randomizer=[
+        app_commands.Choice(name="FF4FE", value="FF4FE"),
+        app_commands.Choice(name="FF6WC", value="FF6WC"),
+        app_commands.Choice(name="FF1R", value="FF1R"),
+        app_commands.Choice(name="FF5CD", value="FF5CD"),
+        app_commands.Choice(name="FFMQR", value="FFMQR")
+    ])
+    async def addpreset(interaction: discord.Interaction, randomizer: app_commands.Choice[str], name: str, flags: str):
+        file_path = PRESET_FILES.get(randomizer.value)
+        presets = {}
+        try:
+            if file_path and os.path.exists(file_path):
+                with open(file_path, "r") as f:
+                    presets = json.load(f)
+            presets[name] = flags
+            with open(file_path, "w") as f:
+                json.dump(presets, f, indent=2)
+            await interaction.response.send_message(f"✅ Preset `{name}` added to {randomizer.name}.", ephemeral=True)
+        except:
+            await interaction.response.send_message("❌ Failed to save preset.", ephemeral=True)
+
+    @bot.tree.command(name="listpresets", description="List all presets for a given randomizer")
+    @app_commands.describe(randomizer="Select the randomizer to view presets for")
+    @app_commands.choices(randomizer=[
+        app_commands.Choice(name="FF4FE", value="FF4FE"),
+        app_commands.Choice(name="FF6WC", value="FF6WC"),
+        app_commands.Choice(name="FF1R", value="FF1R"),
+        app_commands.Choice(name="FF5CD", value="FF5CD"),
+        app_commands.Choice(name="FFMQR", value="FFMQR")
+    ])
+    async def listpresets(interaction: discord.Interaction, randomizer: app_commands.Choice[str]):
+        presets = load_presets_for(randomizer.value)
+        if not presets:
+            await interaction.response.send_message(f"❌ No presets found for {randomizer.name}.", ephemeral=True)
+            return
+        preset_list = "\n".join(f"- `{name}`" for name in presets.keys())
+        await interaction.response.send_message(f"📋 Presets for **{randomizer.name}**:\n{preset_list}", ephemeral=True)
+
     # === DONE ===
     @bot.tree.command(name="done", description="Mark yourself as done (sync auto time, async manual time).")
     @app_commands.describe(time="(Async only) Your finish time in H:MM:SS format")
@@ -199,13 +275,11 @@ def register(bot):
         if not race:
             await interaction.response.send_message("This command must be used inside an active race room.", ephemeral=True)
             return
-
         runners = race.setdefault("runners", {})
         user_id = str(interaction.user.id)
         if user_id in runners and runners[user_id]["status"] in ["done", "forfeit"]:
             await interaction.response.send_message("You are already marked as finished or forfeited.", ephemeral=True)
             return
-
         if race["race_type"] == "async":
             if not time:
                 await interaction.response.send_message("Please provide your finish time in H:MM:SS format (async).", ephemeral=True)
@@ -221,13 +295,11 @@ def register(bot):
             finish_seconds = int((datetime.now(timezone.utc) - race_start).total_seconds())
         runners[user_id] = {"status": "done", "finish_time": finish_seconds}
         save_races()
-
         spoiler_channel = await get_or_create_spoiler_room(interaction.guild, race)
         member = interaction.guild.get_member(interaction.user.id)
         if spoiler_channel and member:
             await spoiler_channel.set_permissions(member, view_channel=True)
         await interaction.response.send_message(f"{interaction.user.mention} has finished!")
-
         joined = set(map(str, race["joined_users"]))
         finished = {uid for uid, data in runners.items() if data["status"] in ["done", "forfeit"]}
         if finished == joined and race["race_type"] == "live":
@@ -248,13 +320,11 @@ def register(bot):
             return
         runners[user_id] = {"status": "forfeit", "finish_time": None}
         save_races()
-
         spoiler_channel = await get_or_create_spoiler_room(interaction.guild, race)
         member = interaction.guild.get_member(interaction.user.id)
         if spoiler_channel and member:
             await spoiler_channel.set_permissions(member, view_channel=True)
         await interaction.response.send_message(f"{interaction.user.mention} has forfeited the race.")
-
         joined = set(map(str, race["joined_users"]))
         finished = {uid for uid, data in runners.items() if data["status"] in ["done", "forfeit"]}
         if finished == joined and race["race_type"] == "live":
@@ -268,7 +338,6 @@ def register(bot):
         if not race or race["race_type"] != "async":
             await interaction.response.send_message("This command must be used inside an active async race room.", ephemeral=True)
             return
-
         runners = race.get("runners", {})
         finishers = [(uid, data["finish_time"]) for uid, data in runners.items() if data["status"] == "done" and data["finish_time"] is not None]
         if finishers:
@@ -282,20 +351,17 @@ def register(bot):
             await interaction.response.send_message("Async race finished! No finishers to award.")
         for uid in runners.keys():
             increment_participation(uid, race["randomizer"])
-
-        ann_channel_id = race.get("announcement_channel_id")
-        ann_message_id = race.get("announcement_message_id")
-        if ann_channel_id and ann_message_id:
-            try:
+        try:
+            ann_channel_id = race.get("announcement_channel_id")
+            ann_message_id = race.get("announcement_message_id")
+            if ann_channel_id and ann_message_id:
                 ann_channel = interaction.guild.get_channel(ann_channel_id)
                 ann_msg = await ann_channel.fetch_message(ann_message_id)
                 await ann_msg.delete()
-            except:
-                pass
-            race.pop("announcement_channel_id", None)
-            race.pop("announcement_message_id", None)
-            save_races()
-
+        except:
+            pass
+        race.pop("announcement_channel_id", None)
+        race.pop("announcement_message_id", None)
         race["async_finished"] = True
         save_races()
         start_cleanup_timer(channel_id)
@@ -376,6 +442,35 @@ def register(bot):
         race["start_time"] = datetime.now(timezone.utc).isoformat()
         save_races()
         await interaction.response.send_message("🕓 This asynchronous race is now marked as started.")
+
+    # === WAGER ===
+    @bot.tree.command(name="wager", description="Wager crystal shards on yourself in this race")
+    @app_commands.describe(amount="How many shards to wager")
+    async def wager(interaction: discord.Interaction, amount: int):
+        channel_id = str(interaction.channel.id)
+        race = races.get(channel_id)
+        user_id = str(interaction.user.id)
+        if not race or user_id not in race["joined_users"]:
+            await interaction.response.send_message("❌ You are not part of this race.", ephemeral=True)
+            return
+        ensure_user_exists(user_id)
+        user_data = users.get(user_id)
+        current_shards = user_data.get("shards", 0)
+        if amount <= 0:
+            await interaction.response.send_message("❌ You must wager at least 1 shard.", ephemeral=True)
+            return
+        if amount > current_shards:
+            await interaction.response.send_message("❌ You don't have enough shards to make this wager.", ephemeral=True)
+            return
+        race.setdefault("wagers", {})
+        if user_id in race["wagers"]:
+            await interaction.response.send_message("⚠️ You've already placed a wager for this race.", ephemeral=True)
+            return
+        users[user_id]["shards"] -= amount
+        race["wagers"][user_id] = amount
+        save_users()
+        save_races()
+        await interaction.response.send_message(f"💰 You wagered **{amount}** shards on yourself. Good luck!", ephemeral=True)
 
     # === USER DETAILS ===
     @bot.tree.command(name="userdetails", description="Check your or another user's race stats and shards")
