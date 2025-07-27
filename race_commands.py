@@ -13,7 +13,7 @@ from race_manager import (
 )
 from utils.spoilers import get_or_create_spoiler_room
 from utils.wagers import handle_wager_payout
-from bot_config import ANNOUNCE_CHANNEL_ID, RACE_ALERT_ROLE_ID, RACE_CATEGORY_ID, PRESET_FILES
+from bot_config import ANNOUNCE_CHANNEL_ID, RACE_ALERT_ROLE_ID, RACE_CATEGORY_ID
 from utils.seeds import generate_seed, load_presets_for
 
 
