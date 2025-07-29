@@ -3,7 +3,9 @@ import discord
 from discord.ext import commands
 import bot_config
 import race_manager
-import bot_commands  # updated import for command folder
+import bot_commands          # race commands package
+import bot_commands.user_commands as user_commands  # NEW: user commands
+from bot_commands.race_commands import register_views  # Persistent Join/Watch buttons
 
 # === Bot Setup ===
 intents = discord.Intents.all()
@@ -25,7 +27,14 @@ async def on_ready():
     race_manager.load_last_activity()
 
     # --- Register slash commands ---
-    bot_commands.register(bot)
+    bot_commands.register(bot)   # Race-related commands
+    user_commands.register(bot)  # User/preset commands
+
+    # --- Register persistent views (Join/Watch buttons) ---
+    register_views(bot)
+
+    # --- Sync commands globally (or use guild sync for dev speed) ---
+    await bot.tree.sync()
 
     # --- Start cleanup loop ---
     race_manager.cleanup_inactive_races.start(bot)
@@ -41,7 +50,7 @@ async def on_message(message):
     # Reset activity timer for race channels
     channel_id = str(message.channel.id)
     if channel_id in race_manager.races:
-        race_manager.last_activity[int(channel_id)] = discord.utils.utcnow()
+        race_manager.last_activity[channel_id] = discord.utils.utcnow()
         race_manager.save_last_activity()
         print(f"⏱️ Activity detected in race channel {message.channel.name}, timer reset.")
 
