@@ -2,7 +2,7 @@ import os
 from dotenv import load_dotenv
 
 # === Load .env file ===
-load_dotenv(r"path_to_file")
+load_dotenv(r"C:\Users\Administrator\Desktop\FIVALLRACE\FFIVALLRace.env")
 
 # === Discord Bot Token ===
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
@@ -27,3 +27,11 @@ FF6WC_PRESETS_FILE = os.getenv("FF6WC_PRESETS_FILE")
 # === API Keys ===
 FF4FE_API_KEY = os.getenv("FF4FE_API_KEY")
 FF6WC_API_KEY = os.getenv("FF6WC_API_KEY")  # optional
+
+PRESET_FILES = {
+    "FF4FE": FF4FE_PRESETS_FILE,
+    "FF1R": FF1R_PRESETS_FILE,
+    "FF5CD": FF5CD_PRESETS_FILE,
+    "FFMQR": FFMQR_PRESETS_FILE,
+    "FF6WC": FF6WC_PRESETS_FILE,
+}
