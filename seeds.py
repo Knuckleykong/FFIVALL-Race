@@ -29,8 +29,7 @@ def load_presets_for(randomizer: str):
     with open(file_path, "r") as f:
         return json.load(f)
 
-
-# === FF4FE Seed Generation (Legacy API) ===
+# === FF4FE Seed Generation ===
 def generate_ff4fe_seed(preset_or_flags: str) -> str:
     custom_presets = load_presets_for("FF4FE")
     flags = custom_presets.get(preset_or_flags, preset_or_flags or random.choice(list(custom_presets.values())))
@@ -44,7 +43,7 @@ def generate_ff4fe_seed(preset_or_flags: str) -> str:
         if gen_data.get("status") == "ok":
             task_id = gen_data.get("task_id")
             for _ in range(20):
-                time.sleep(1.5)
+                time.sleep(3)  # increased from 1.5 to 3
                 task_data = requests.get(
                     f"https://ff4fe.galeswift.com/api/task?key={FF4FE_API_KEY}&id={task_id}",
                     headers={"User-Agent": "DiscordBot"}
@@ -67,8 +66,7 @@ def generate_ff4fe_seed(preset_or_flags: str) -> str:
         print(f"❌ FF4FE seed error: {e}")
     return None
 
-
-# === FF6WC Seed Generation (Legacy Placeholder) ===
+# === FF6WC Seed Generation ===
 def generate_ff6wc_seed(preset_or_flags: str) -> str:
     custom_presets = load_presets_for("FF6WC")
     flags = custom_presets.get(preset_or_flags, preset_or_flags or random.choice(list(custom_presets.values())))
@@ -81,7 +79,7 @@ def generate_ff6wc_seed(preset_or_flags: str) -> str:
         if gen_data.get("status") == "ok":
             seed_id = gen_data.get("seed_id")
             for _ in range(20):
-                time.sleep(1.5)
+                time.sleep(3)  # increased from 1.5 to 3
                 status_data = requests.get(
                     f"https://ff6worldscollide.com/api/seed/status?key={FF6WC_API_KEY}&id={seed_id}",
                     headers={"User-Agent": "DiscordBot"}
@@ -94,8 +92,7 @@ def generate_ff6wc_seed(preset_or_flags: str) -> str:
         print(f"❌ FF6WC seed error: {e}")
     return None
 
-
-# === Generic Seed URL Builder (for static flag-based randomizers) ===
+# === Generic Seed URL Builder ===
 def generate_url_seed(randomizer: str, preset_name: str, base_url: str) -> str:
     presets = load_presets_for(randomizer)
     flagset = presets.get(preset_name)
@@ -104,8 +101,7 @@ def generate_url_seed(randomizer: str, preset_name: str, base_url: str) -> str:
     seed_hash = ''.join(random.choices("0123456789ABCDEF", k=8))
     return f"{base_url}?s={seed_hash}&f={flagset}"
 
-
-# === Dispatcher (Main entry point) ===
+# === Dispatcher ===
 def generate_seed(randomizer: str, preset_or_flags: str) -> str:
     if randomizer == "FF4FE":
         return generate_ff4fe_seed(preset_or_flags)
@@ -116,6 +112,5 @@ def generate_seed(randomizer: str, preset_or_flags: str) -> str:
     elif randomizer == "FF1R":
         return generate_url_seed("FF1R", preset_or_flags, "https://4-8-6.finalfantasyrandomizer.com/")
     elif randomizer == "FF5CD":
-        # FF5CD is manually handled (user uploads zip)
         return None
     return f"https://placeholder.seed.url/{randomizer}/{preset_or_flags}"
