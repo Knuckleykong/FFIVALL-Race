@@ -37,7 +37,6 @@ def load_users():
     if USERS_FILE and os.path.exists(USERS_FILE):
         with open(USERS_FILE, "r") as f:
             users.update(json.load(f))
-    # Ensure all loaded users have shards
     for uid in users.keys():
         ensure_user_exists(uid)
 
@@ -52,29 +51,22 @@ def load_last_activity():
     if LAST_ACTIVITY_FILE and os.path.exists(LAST_ACTIVITY_FILE):
         with open(LAST_ACTIVITY_FILE, "r") as f:
             data = json.load(f)
-            # Convert stored ISO times to datetime objects
-            last_activity = {int(k): datetime.fromisoformat(v) for k, v in data.items()}
+            last_activity = {k: datetime.fromisoformat(v) for k, v in data.items()}
 
 def save_last_activity():
     if LAST_ACTIVITY_FILE:
         with open(LAST_ACTIVITY_FILE, "w") as f:
-            # Convert datetime to ISO string
-            json.dump({str(k): v.isoformat() for k, v in last_activity.items()}, f, indent=4)
+            json.dump({k: v.isoformat() for k, v in last_activity.items()}, f, indent=4)
 
 # === User Helpers ===
 def ensure_user_exists(user_id):
     user_id = str(user_id)
-    # If user does not exist, create with default shards
     if user_id not in users:
         users[user_id] = {"shards": 100, "races_joined": {}, "races_won": {}}
     else:
-        # Fix missing keys if file was incomplete
-        if "shards" not in users[user_id]:
-            users[user_id]["shards"] = 100
-        if "races_joined" not in users[user_id]:
-            users[user_id]["races_joined"] = {}
-        if "races_won" not in users[user_id]:
-            users[user_id]["races_won"] = {}
+        users[user_id].setdefault("shards", 100)
+        users[user_id].setdefault("races_joined", {})
+        users[user_id].setdefault("races_won", {})
 
 def award_crystal_shards(user_id, randomizer):
     ensure_user_exists(user_id)
@@ -92,16 +84,15 @@ def increment_participation(user_id, randomizer):
 
 # === Cleanup Timer Trigger ===
 def start_cleanup_timer(channel_id):
-    """Mark race as finished and reset last activity so 10min countdown can start"""
-    last_activity[int(channel_id)] = datetime.now(timezone.utc)
+    last_activity[str(channel_id)] = datetime.now(timezone.utc)
     save_last_activity()
 
     race = races.get(str(channel_id))
-    if race and race.get("race_type") == "live" and not race.get("finished", False):
-        race["finished"] = True
-        save_races()
-    elif race and race.get("race_type") == "async" and not race.get("async_finished", False):
-        race["async_finished"] = True
+    if race:
+        if race.get("race_type") == "live" and not race.get("finished", False):
+            race["finished"] = True
+        elif race.get("race_type") == "async" and not race.get("async_finished", False):
+            race["async_finished"] = True
         save_races()
 
 # === Cleanup Task ===
@@ -109,7 +100,7 @@ def start_cleanup_timer(channel_id):
 async def cleanup_inactive_races(bot):
     now = datetime.now(timezone.utc)
     for channel_id, last_active in list(last_activity.items()):
-        race = races.get(str(channel_id))
+        race = races.get(channel_id)
         if not race or not race.get("started"):
             continue
 
@@ -124,8 +115,8 @@ async def cleanup_inactive_races(bot):
         if race_type == "async" and not (all_runners_finished and race.get("async_finished")):
             continue
 
-        if (now - last_active).total_seconds() > 600:
-            guild = bot.guilds[0]  # assumes single guild bot
+        if (now - last_active).total_seconds() > 45:
+            guild = bot.guilds[0]
             race_channel = guild.get_channel(int(channel_id))
             if race_channel:
                 try:
@@ -150,11 +141,10 @@ async def cleanup_inactive_races(bot):
                     try:
                         ann_msg = await ann_channel.fetch_message(ann_message_id)
                         await ann_msg.delete()
-                        print(f"🧹 Deleted race announcement message {ann_message_id}")
                     except Exception as e:
                         print(f"❌ Failed to delete announcement message {ann_message_id}: {e}")
 
-            races.pop(str(channel_id), None)
+            races.pop(channel_id, None)
             last_activity.pop(channel_id, None)
             save_races()
             save_last_activity()
