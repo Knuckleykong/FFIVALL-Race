@@ -36,10 +36,10 @@ async def on_ready():
     # --- Sync commands globally (or use guild sync for dev speed) ---
     await bot.tree.sync()
 
-    # --- Start cleanup loop ---
-    race_manager.cleanup_inactive_races.start(bot)
+    # --- Resume pending race cleanup timers ---
+    await race_manager.resume_cleanup_on_startup(bot)
 
-    print("✅ All slash commands registered & cleanup started!")
+    print("✅ All slash commands registered & persistent cleanup timers resumed!")
 
 @bot.event
 async def on_message(message):
