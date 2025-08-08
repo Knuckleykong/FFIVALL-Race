@@ -16,17 +16,73 @@ def register(bot):
         user_id = str(interaction.user.id)
         ensure_user_exists(user_id)
         user_data = users[user_id]
-        if amount <= 0 or amount > user_data.get("shards", 0):
+
+        # === Validate wager amount ===
+        if amount <= 0:
             await interaction.response.send_message("❌ Invalid wager amount.", ephemeral=True)
             return
-        if not race or user_id not in race["joined_users"]:
-            await interaction.response.send_message("❌ You are not part of this race.", ephemeral=True)
+
+        # === Validate race existence ===
+        if not race:
+            await interaction.response.send_message("❌ No active race found in this channel.", ephemeral=True)
             return
-        race.setdefault("wagers", {})[user_id] = amount
-        user_data["shards"] -= amount
-        save_users()
+
+        # === Check race state (cutoff logic) ===
+        if race.get("race_type") == "live" and race.get("started", False):
+            await interaction.response.send_message(
+                "❌ Wagering is closed because the live race has started.",
+                ephemeral=True
+            )
+            return
+        if race.get("race_type") == "async" and race.get("async_finished", False):
+            await interaction.response.send_message(
+                "❌ Wagering is closed because the async race has finished.",
+                ephemeral=True
+            )
+            return
+
+        # === Participation check (creator or joined) ===
+        creator_id = str(race.get("creator_id", ""))
+        joined_users = [str(uid) for uid in race.get("joined_users", [])]
+        if user_id != creator_id and user_id not in joined_users:
+            await interaction.response.send_message(
+                "❌ You are not part of this race (must be race creator or have joined).",
+                ephemeral=True
+            )
+            return
+
+        # === Ensure wagers dict exists ===
+        race.setdefault("wagers", {})
+
+        # === Add to existing wager ===
+        current_wager = race["wagers"].get(user_id, 0)
+        total_new_wager = current_wager + amount
+
+        # === Check shard balance ===
+        available_shards = user_data.get("crystal_shards", 0)
+        if total_new_wager > available_shards + current_wager:
+            await interaction.response.send_message(
+                f"❌ Not enough shards (Available: {available_shards}).",
+                ephemeral=True
+            )
+            return
+
+        # === Deduct and record wager ===
+        user_data["crystal_shards"] = available_shards - amount
+        race["wagers"][user_id] = total_new_wager
+
+        # === Calculate total pot ===
+        total_pot = sum(race["wagers"].values())
+
         save_races()
-        await interaction.response.send_message(f"💰 Wagered {amount} shards on yourself.", ephemeral=True)
+        save_users()
+
+        await interaction.response.send_message(
+            f"💎 {interaction.user.mention} wagered **{amount}** shards "
+            f"(Total wager: **{total_new_wager}**, Pot: **{total_pot}**)!"
+        )
+
+
 
     @bot.tree.command(name="userdetails", description="Check user race stats and shards")
     @app_commands.describe(user="User to check (blank = yourself)")
@@ -35,14 +91,14 @@ def register(bot):
         user_id = str(target.id)
         ensure_user_exists(user_id)
         data = users.get(user_id, {"shards": 0, "races_joined": {}, "races_won": {}})
-        lines = [f"📊 Stats for **{target.display_name}**", f"💎 Shards: `{data['shards']}`"]
+        lines = [f"📊 Stats for **{target.display_name}**", f"💎 Shards: `{data['crystal_shards']}`"]
         if not data["races_joined"]:
             lines.append("No race history.")
         else:
             lines.append("🏁 Races by Randomizer:")
             for rando in sorted(set(list(data["races_joined"].keys()) + list(data["races_won"].keys()))):
                 lines.append(f"• **{rando}**: {data['races_joined'].get(rando, 0)} joined, {data['races_won'].get(rando, 0)} won")
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+        await interaction.response.send_message("\n".join(lines), ephemeral=False)
 
     @bot.tree.command(name="addpreset", description="Add a preset to a randomizer")
     @app_commands.describe(randomizer="Randomizer to store this preset under", name="Preset name", flags="Flagstring")
