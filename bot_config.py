@@ -2,7 +2,7 @@ import os
 from dotenv import load_dotenv
 
 # === Load .env file ===
-load_dotenv(r"C:\Users\Administrator\Desktop\FIVALLRACE\FFIVALLRace.env")
+load_dotenv(path to file)
 
 # === Discord Bot Token ===
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
